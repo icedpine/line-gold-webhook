@@ -3,69 +3,105 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
-const SECRET_KEY = process.env.SECRET_KEY;
-let lastSignal = null;
+const SECRET_KEY = process.env.SECRET_KEY || "CHANGE_ME";
 
-// health check
+// ====== Queue settings ======
+const MAX_QUEUE = Number(process.env.MAX_QUEUE || 50); // 溜める上限（任意）
+const DEDUPE_TTL_MS = Number(process.env.DEDUPE_TTL_MS || 5 * 60 * 1000); // id重複防止(5分)
+
+// FIFO queue
+let queue = [];
+
+// id dedupe (in-memory)
+const seen = new Map(); // id -> timestamp(ms)
+function gcSeen(now) {
+  for (const [id, ts] of seen.entries()) {
+    if (now - ts > DEDUPE_TTL_MS) seen.delete(id);
+  }
+}
+
+// ---- helpers ----
+function normalizeCmd(cmd) {
+  const c = String(cmd || "").trim().toUpperCase();
+  if (c !== "BUY" && c !== "SELL") return null;
+  return c;
+}
+
+function normalizeSymbol(symbol) {
+  const s = String(symbol || "").trim().toUpperCase();
+  // ここで全部GOLDに寄せる（あなたの運用方針）
+  if (s === "GOLD" || s === "XAUUSD" || s === "XAU/USD" || s === "XAUUSD#") return "GOLD";
+  // それ以外はそのまま（必要ならここで弾く）
+  return s;
+}
+
+function auth(req, res) {
+  const key = req.query.key;
+  if (!key || key !== SECRET_KEY) {
+    res.status(403).json({ error: "invalid key" });
+    return false;
+  }
+  return true;
+}
+
+// ====== routes ======
 app.get("/health", (req, res) => {
   res.json({ ok: true, status: "ok" });
 });
 
-// receive signal
+// push signal into queue
 app.post("/signal", (req, res) => {
-  const key = req.query.key;
-  if (key !== SECRET_KEY) {
-    return res.status(403).json({ error: "invalid key" });
-  }
+  if (!auth(req, res)) return;
 
-  let { cmd, symbol, id } = req.body;
+  const { cmd, symbol, id } = req.body || {};
 
-  // 必須チェック（最低限）
-  if (!cmd || !symbol || !id) {
+  const ncmd = normalizeCmd(cmd);
+  const nsym = normalizeSymbol(symbol);
+  const nid = String(id || "").trim();
+
+  if (!ncmd || !nsym || !nid) {
     return res.status(400).json({
-      error: "missing fields",
-      required: ["cmd", "symbol", "id"],
-      received: req.body
+      error: "missing/invalid fields",
+      required: ["cmd(BUY/SELL)", "symbol", "id"],
     });
   }
 
-  // 正規化
-  cmd = String(cmd).toUpperCase();
-  symbol = String(symbol).toUpperCase();
+  const now = Date.now();
+  gcSeen(now);
 
-  if (cmd !== "BUY" && cmd !== "SELL") {
-    return res.status(400).json({ error: "invalid cmd" });
+  // 重複IDは受け付けない（MacroDroidが誤爆連投しても安全）
+  if (seen.has(nid)) {
+    return res.json({ ok: true, deduped: true });
   }
+  seen.set(nid, now);
 
-  // symbol 正規化（安心設計）
-  if (symbol === "XAUUSD" || symbol === "XAUUSD#" || symbol === "GOLD") {
-    symbol = "GOLD";
+  const item = { cmd: ncmd, symbol: nsym, id: nid, ts: now };
+
+  // queue上限：古いのを落とす（安全策）
+  if (queue.length >= MAX_QUEUE) {
+    queue.shift();
   }
+  queue.push(item);
 
-  lastSignal = {
-    cmd,
-    symbol,
-    id,
-    ts: Date.now()
-  };
-
-  res.json({ ok: true });
+  res.json({ ok: true, queued: true, size: queue.length, stored: { id: item.id, cmd: item.cmd, symbol: item.symbol } });
 });
 
-// fetch last signal
+// pop one signal from queue (FIFO)
 app.get("/last", (req, res) => {
-  const key = req.query.key;
-  if (key !== SECRET_KEY) {
-    return res.status(403).json({ error: "invalid key" });
-  }
+  if (!auth(req, res)) return;
 
-  if (!lastSignal) {
+  if (queue.length === 0) {
     return res.json({ signal: null });
   }
 
-  const s = lastSignal;
-  lastSignal = null; // 1回取得したら消す
-  res.json(s);
+  const item = queue.shift();
+  res.json(item);
+});
+
+// (任意) 現在のキュー長確認：運用時の監視用（不要なら消してOK）
+app.get("/queue_len", (req, res) => {
+  if (!auth(req, res)) return;
+  res.json({ ok: true, size: queue.length });
 });
 
 const port = process.env.PORT || 3000;
