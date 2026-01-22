@@ -165,7 +165,7 @@ app.post("/signal/c_raw", (req, res) => {
   }
 
   // ロット（本文にあれば拾う。無ければEA側のLotsを使う想定）
-  const lots = extractLots(null); // nullでもOK
+  const lots = extractLots(text); // nullでもOK
 
   // 3ポジ固定（要件）
   const n = 3;
