@@ -114,13 +114,13 @@ app.post("/signal/c_raw", (req, res) => {
   symbol = normalizeSymbol(symbol || "GOLD");
 
   if (!id || !text) {
-    return res.status(400).json({ error: "missing fields", required: ["id", "text"] });
+    return res.status(400).json({ error: "missing fields", required: ["id", "text"], received: req.body });
   }
 
-  // オプチャ名で縛りたい場合（任意）
-  if (room && room !== "ゆなのエントリー共有のへや") {
-    return res.json({ ok: true, ignored: "room_mismatch" });
-  }
+  // ★重要：roomチェックは無効化（通知仕様でブレるため）
+  // if (room && room !== "ゆなのエントリー共有のへや") {
+  //   return res.json({ ok: true, ignored: "room_mismatch" });
+  // }
 
   // ロング/ショート判定
   const isLong = /ロング/i.test(text);
@@ -130,7 +130,9 @@ app.post("/signal/c_raw", (req, res) => {
   }
   const cmd = isLong ? "BUY" : "SELL";
 
-  const who = admin || (text.includes("ゆな") ? "ゆな" : (text.includes("しおり") ? "しおり" : "unknown"));
+  const who =
+    admin ||
+    (text.includes("ゆな") ? "ゆな" : (text.includes("しおり") ? "しおり" : "unknown"));
 
   const entry = extractNumber(text, [
     /エントリー\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i,
@@ -147,18 +149,17 @@ app.post("/signal/c_raw", (req, res) => {
       error: "parse_failed",
       need: ["entry", "sl"],
       who,
+      room,
       received_text: text
     });
   }
 
-  // ★ロットは本文から拾わない（EA側のDefaultLotsを使う）
   const n = 3;
 
   cleanupSeen(seenC);
   if (seenC.has(id)) return res.json({ ok: true, deduped: true });
   seenC.set(id, Date.now());
 
-  // ★lots をキューに入れない
   pushQueue(queueC, {
     cmd,
     symbol: symbol || "GOLD",
@@ -167,6 +168,7 @@ app.post("/signal/c_raw", (req, res) => {
     sl,
     n,
     who,
+    room,
     ts: Date.now()
   });
 
