@@ -95,19 +95,11 @@ app.post("/signal/b", (req, res) => handleSignal(req, res, queueB, seenB));
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
 // ===== C：raw本文を受け取り、entry/slを抽出してqueueCへ積む =====
-// MacroDroidから送るJSON例：
-// { "room":"ゆなのエントリー共有のへや", "admin":"ゆな", "text":"...全文...", "id":"..." }
 function extractNumber(text, patterns) {
   for (const re of patterns) {
     const m = text.match(re);
     if (m && m[1]) return Number(m[1]);
   }
-  return null;
-}
-
-function extractLots(text) {
-  const m = text.match(/([0-9]+(?:\.[0-9]+)?)\s*ロット/i);
-  if (m && m[1]) return Number(m[1]);
   return null;
 }
 
@@ -126,12 +118,11 @@ app.post("/signal/c_raw", (req, res) => {
   }
 
   // オプチャ名で縛りたい場合（任意）
-  // ここで一致しなければ捨てる（誤爆防止）
   if (room && room !== "ゆなのエントリー共有のへや") {
     return res.json({ ok: true, ignored: "room_mismatch" });
   }
 
-  // ロング/ショート判定（本文に "ロング"/"ショート" が含まれた時点でOK）
+  // ロング/ショート判定
   const isLong = /ロング/i.test(text);
   const isShort = /ショート/i.test(text);
   if (!isLong && !isShort) {
@@ -139,12 +130,8 @@ app.post("/signal/c_raw", (req, res) => {
   }
   const cmd = isLong ? "BUY" : "SELL";
 
-  // 管理人判定：adminが入っていればそれを使う。無ければ本文から推測も可
   const who = admin || (text.includes("ゆな") ? "ゆな" : (text.includes("しおり") ? "しおり" : "unknown"));
 
-  // 抽出ルール（ゆな / しおり）
-  // ゆな：エントリー⇒xxxx / 損切⇒xxxx
-  // しおり：EN⇒xxxx / SL⇒xxxx
   const entry = extractNumber(text, [
     /エントリー\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i,
     /\bEN\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
@@ -164,16 +151,14 @@ app.post("/signal/c_raw", (req, res) => {
     });
   }
 
-  // ロット（本文にあれば拾う。無ければEA側のLotsを使う想定）
-  const lots = extractLots(text); // nullでもOK
-
-  // 3ポジ固定（要件）
+  // ★ロットは本文から拾わない（EA側のDefaultLotsを使う）
   const n = 3;
 
   cleanupSeen(seenC);
   if (seenC.has(id)) return res.json({ ok: true, deduped: true });
   seenC.set(id, Date.now());
 
+  // ★lots をキューに入れない
   pushQueue(queueC, {
     cmd,
     symbol: symbol || "GOLD",
@@ -181,7 +166,6 @@ app.post("/signal/c_raw", (req, res) => {
     entry,
     sl,
     n,
-    lots,     // nullならEA側のLotsを使う
     who,
     ts: Date.now()
   });
