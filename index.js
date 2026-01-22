@@ -123,8 +123,27 @@ app.post("/signal/c_raw", (req, res) => {
   // }
 
   // ロング/ショート判定
-  const isLong = /ロング/i.test(text);
-  const isShort = /ショート/i.test(text);
+const t = text.toUpperCase();
+
+// より強い判定（日本語ブレ耐性）
+const isLong =
+  t.includes("ロング") ||
+  t.includes("LONG") ||
+  t.includes("GOLDロング") ||
+  t.includes("GOLD LONG");
+
+const isShort =
+  t.includes("ショート") ||
+  t.includes("SHORT") ||
+  t.includes("GOLDショート") ||
+  t.includes("GOLD SHORT");
+
+if (!isLong && !isShort) {
+  return res.json({ ok: true, ignored: "no_direction" });
+}
+
+const cmd = isLong ? "BUY" : "SELL";
+
   if (!isLong && !isShort) {
     return res.json({ ok: true, ignored: "no_direction" });
   }
