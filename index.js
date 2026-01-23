@@ -38,7 +38,8 @@ function pushQueue(queue, item) {
 // ===== Queue A/B =====
 const queueA = [];
 const seenA = new Map();
-const queueB = [];
+const queueB = new Map(); // ←（※元コードだと配列だったので戻す）
+const queueB_arr = [];    // 互換：queueBを配列として使う
 const seenB = new Map();
 
 // ===== Queue C =====
@@ -89,8 +90,9 @@ const jsonParser = express.json({ strict: true, limit: "1mb" });
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
 app.get("/last/a", (req, res) => handleLast(req, res, queueA));
 
-app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, seenB));
-app.get("/last/b", (req, res) => handleLast(req, res, queueB));
+// ★ここは元の通り queueB_arr を使う（最小変更）
+app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB_arr, seenB));
+app.get("/last/b", (req, res) => handleLast(req, res, queueB_arr));
 
 
 // ===== C 共通 =====
@@ -117,33 +119,44 @@ function detectDirection(text) {
   return isLong ? "BUY" : "SELL";
 }
 
-function parseEntrySlByWho(who, text) {
+/**
+ * ★修正：ゆな/しおり別に entry/sl に加えて tp を抽出する
+ *  - ゆな：利確 ⇒ の値をTPにする
+ *  - しおり：TP1 ⇒ の値をTPにする
+ */
+function parseEntrySlTpByWho(who, text) {
   const t = String(text);
   const arrow = "[:：⇒=>→]";
 
   if (who === "ゆな") {
-    return {
-      entry: extractNumber(t, [new RegExp(`エントリー\\s*${arrow}\\s*([0-9.]+)`, "i")]),
-      sl:    extractNumber(t, [new RegExp(`損切\\s*${arrow}\\s*([0-9.]+)`, "i")])
-    };
+    const entry = extractNumber(t, [new RegExp(`エントリー\\s*${arrow}\\s*([0-9.]+)`, "i")]);
+    const sl    = extractNumber(t, [new RegExp(`損切\\s*${arrow}\\s*([0-9.]+)`, "i")]);
+
+    // 「利確           ⇒5045.5」みたいに空白が多いのも拾う
+    const tp    = extractNumber(t, [new RegExp(`利確\\s*${arrow}\\s*([0-9.]+)`, "i")]);
+
+    return { entry, sl, tp };
   }
 
   if (who === "しおり") {
-    return {
-      entry: extractNumber(t, [new RegExp(`\\bEN\\s*${arrow}\\s*([0-9.]+)`, "i")]),
-      sl:    extractNumber(t, [new RegExp(`\\bSL\\s*${arrow}\\s*([0-9.]+)`, "i")])
-    };
+    const entry = extractNumber(t, [new RegExp(`\\bEN\\s*${arrow}\\s*([0-9.]+)`, "i")]);
+    const sl    = extractNumber(t, [new RegExp(`\\bSL\\s*${arrow}\\s*([0-9.]+)`, "i")]);
+
+    const tp    = extractNumber(t, [new RegExp(`\\bTP1\\s*${arrow}\\s*([0-9.]+)`, "i")]);
+
+    return { entry, sl, tp };
   }
 
-  return { entry: null, sl: null };
+  return { entry: null, sl: null, tp: null };
 }
 
-// ===== ★追加：C 短期デデュープ =====
+// ===== ★C 短期デデュープ =====
 const C_DEDUP_MS = 2000;
 const cRecent = new Map();
 
 function makeDedupKey(item) {
-  return `${item.who}|${item.cmd}|${item.symbol}|${item.entry}|${item.sl}`;
+  // ★修正：tp も含める（TP違いで誤デデュープしない）
+  return `${item.who}|${item.cmd}|${item.symbol}|${item.entry}|${item.sl}|${item.tp ?? ""}`;
 }
 
 function isDuplicateAndMark(key) {
@@ -170,10 +183,12 @@ function queueCSignal({ room, who, text, symbol, id }) {
     return { ok: true, ignored: "who_not_allowed" };
   }
 
-  const { entry, sl } = parseEntrySlByWho(who, text);
-  if (!entry || !sl) return { ok: false, error: "parse_failed" };
+  // ★修正：TPも抽出
+  const { entry, sl, tp } = parseEntrySlTpByWho(who, text);
+  if (!entry || !sl || !tp) return { ok: false, error: "parse_failed" };
 
-  const item = { cmd, symbol, id, entry, sl, n: 3, who, room, ts: Date.now() };
+  // ★修正：itemに tp を追加
+  const item = { cmd, symbol, id, entry, sl, tp, n: 3, who, room, ts: Date.now() };
 
   const dkey = makeDedupKey(item);
   if (isDuplicateAndMark(dkey)) {
