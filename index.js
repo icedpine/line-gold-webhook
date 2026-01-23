@@ -35,20 +35,23 @@ function pushQueue(queue, item) {
   while (queue.length > MAX_QUEUE) queue.shift();
 }
 
-// ===== Queue A/B =====
+function safeId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+}
+
+// ===== Queue A/B/C =====
 const queueA = [];
 const seenA = new Map();
-const queueB = new Map(); // ←（※元コードだと配列だったので戻す）
-const queueB_arr = [];    // 互換：queueBを配列として使う
+
+const queueB = [];
 const seenB = new Map();
 
-// ===== Queue C =====
 const queueC = [];
 
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/B：汎用フォーマット受信 =====
+// ===== A/B：汎用フォーマット受信（既存互換で残す） =====
 const SEEN_TTL_MS = 5 * 60 * 1000;
 
 function cleanupSeen(seenMap) {
@@ -70,6 +73,9 @@ function handleSignal(req, res, queue, seen) {
   symbol = normalizeSymbol(symbol);
   id = String(id);
 
+  if (!cmd) return res.status(400).json({ error: "invalid cmd" });
+  if (!symbol) return res.status(400).json({ error: "invalid symbol" });
+
   cleanupSeen(seen);
   if (seen.has(id)) return res.json({ ok: true, deduped: true });
   seen.set(id, Date.now());
@@ -84,18 +90,144 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-// A/B は JSON をルート単位で
+// A/B は JSON をルート単位で（curl/手動送信用）
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
 app.get("/last/a", (req, res) => handleLast(req, res, queueA));
 
-// ★ここは元の通り queueB_arr を使う（最小変更）
-app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB_arr, seenB));
-app.get("/last/b", (req, res) => handleLast(req, res, queueB_arr));
+app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, seenB));
+app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
 
-// ===== C 共通 =====
+// =========================================================
+// ===== A/B：Cと同じ “Plain運用” を追加（MacroDroid推奨）=====
+// =========================================================
+
+// ★短期デデュープ（同一通知の二重POSTだけ潰す）
+const AB_DEDUP_MS = 2000;
+const abRecent = new Map();
+
+function abMakeDedupKey({ channel, who, room, cmd, symbol, text }) {
+  // textは同一通知判定に少しだけ使う（長すぎないように先頭だけ）
+  const t = String(text || "").replace(/\s+/g, " ").trim().slice(0, 120);
+  return `${channel}|${who}|${room}|${cmd}|${symbol}|${t}`;
+}
+
+function abIsDuplicateAndMark(key) {
+  const now = Date.now();
+  const prev = abRecent.get(key) || 0;
+
+  // 軽い掃除
+  for (const [k, ts] of abRecent.entries()) {
+    if (now - ts > AB_DEDUP_MS * 5) abRecent.delete(k);
+  }
+
+  if (now - prev < AB_DEDUP_MS) return true;
+  abRecent.set(key, now);
+  return false;
+}
+
+// A専用：文言でBUY/SELL判定
+function detectDirectionA(text) {
+  const t = String(text || "");
+  // 仕様通り：固定フレーズに寄せる（誤反応防止）
+  if (t.includes("ゴールドロングエントリー")) return "BUY";
+  if (t.includes("ゴールドショートエントリー")) return "SELL";
+  return "";
+}
+
+// B専用：文言でBUY/SELL判定
+function detectDirectionB(text) {
+  const t = String(text || "");
+  // Allyのメッセージ例に寄せる（誤反応防止）
+  if (t.includes("ゴールドロング") && (t.includes("成行買い") || t.includes("買い"))) return "BUY";
+  if (t.includes("ゴールドショート") && (t.includes("成行売り") || t.includes("売り"))) return "SELL";
+  return "";
+}
+
+function queueABSignal({ channel, room, who, text, symbol }) {
+  symbol = normalizeSymbol(symbol || "GOLD");
+  room = String(room || "");
+  who = String(who || "");
+  text = String(text || "");
+
+  let cmd = "";
+  if (channel === "A") cmd = detectDirectionA(text);
+  if (channel === "B") cmd = detectDirectionB(text);
+
+  if (!cmd) return { ok: true, ignored: "no_direction" };
+
+  // キューへ
+  const item = {
+    cmd,
+    symbol,
+    id: safeId(channel),
+    room,
+    who,
+    ts: Date.now()
+  };
+
+  const dkey = abMakeDedupKey({ channel, who, room, cmd, symbol, text });
+  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
+
+  if (channel === "A") pushQueue(queueA, item);
+  else pushQueue(queueB, item);
+
+  return { ok: true, queued: true, size: channel === "A" ? queueA.length : queueB.length };
+}
+
+// ===== A：Plain（MacroDroid）=====
+app.post("/signal/a_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLD");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  // オプチャ名・管理人名チェック（安全に誤反応防止）
+  // ※通知の表記ブレがあるなら、まずはコメントアウトして動作確認→必要なら緩める
+  if (room && room !== "【FX】さくらサロン") {
+    return res.json({ ok: true, ignored: "room_mismatch", room });
+  }
+  if (who && who !== "春音さくら") {
+    return res.json({ ok: true, ignored: "who_mismatch", who });
+  }
+
+  const out = queueABSignal({ channel: "A", room, who, text, symbol });
+  return res.json(out);
+});
+
+// ===== B：Plain（MacroDroid）=====
+app.post("/signal/b_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLD");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  // オプチャ名・管理人名チェック（安全に誤反応防止）
+  if (room && room !== "FX裁量配信【ゴールデンランサーズ】") {
+    return res.json({ ok: true, ignored: "room_mismatch", room });
+  }
+  if (who && who !== "Ally") {
+    return res.json({ ok: true, ignored: "who_mismatch", who });
+  }
+
+  const out = queueABSignal({ channel: "B", room, who, text, symbol });
+  return res.json(out);
+});
+
+
+// =====================
+// ===== C（ここは維持）=====
+// =====================
 const DEBUG_C = true;
 function cLog(...args) { if (DEBUG_C) console.log(...args); }
 
@@ -120,7 +252,6 @@ function detectDirection(text) {
 }
 
 /**
- * ★修正：ゆな/しおり別に entry/sl に加えて tp を抽出する
  *  - ゆな：利確 ⇒ の値をTPにする
  *  - しおり：TP1 ⇒ の値をTPにする
  */
@@ -131,19 +262,14 @@ function parseEntrySlTpByWho(who, text) {
   if (who === "ゆな") {
     const entry = extractNumber(t, [new RegExp(`エントリー\\s*${arrow}\\s*([0-9.]+)`, "i")]);
     const sl    = extractNumber(t, [new RegExp(`損切\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-
-    // 「利確           ⇒5045.5」みたいに空白が多いのも拾う
     const tp    = extractNumber(t, [new RegExp(`利確\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-
     return { entry, sl, tp };
   }
 
   if (who === "しおり") {
     const entry = extractNumber(t, [new RegExp(`\\bEN\\s*${arrow}\\s*([0-9.]+)`, "i")]);
     const sl    = extractNumber(t, [new RegExp(`\\bSL\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-
     const tp    = extractNumber(t, [new RegExp(`\\bTP1\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-
     return { entry, sl, tp };
   }
 
@@ -155,7 +281,6 @@ const C_DEDUP_MS = 2000;
 const cRecent = new Map();
 
 function makeDedupKey(item) {
-  // ★修正：tp も含める（TP違いで誤デデュープしない）
   return `${item.who}|${item.cmd}|${item.symbol}|${item.entry}|${item.sl}|${item.tp ?? ""}`;
 }
 
@@ -183,11 +308,9 @@ function queueCSignal({ room, who, text, symbol, id }) {
     return { ok: true, ignored: "who_not_allowed" };
   }
 
-  // ★修正：TPも抽出
   const { entry, sl, tp } = parseEntrySlTpByWho(who, text);
   if (!entry || !sl || !tp) return { ok: false, error: "parse_failed" };
 
-  // ★修正：itemに tp を追加
   const item = { cmd, symbol, id, entry, sl, tp, n: 3, who, room, ts: Date.now() };
 
   const dkey = makeDedupKey(item);
