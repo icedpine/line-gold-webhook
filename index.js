@@ -1,7 +1,12 @@
 import express from "express";
 
 const app = express();
+
+// ★ここが重要：
+// 1) JSONは「application/json」のときだけ読む（MacroDroidは後で text/plain にする）
+// 2) text/plain を受け取れるようにする（改行OK）
 app.use(express.json({ strict: true, limit: "1mb" }));
+app.use(express.text({ type: "text/plain", limit: "1mb" }));
 
 const SECRET_KEY = process.env.SECRET_KEY;
 
@@ -95,14 +100,9 @@ app.post("/signal/b", (req, res) => handleSignal(req, res, queueB, seenB));
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
 
-// ===== C：raw本文を受け取り、admin別に entry/sl を抽出して queueC へ積む =====
-
-// Renderログで切り分けできるようにする（必要なら false に）
+// ===== C：パース共通 =====
 const DEBUG_C = true;
-
-function cLog(...args) {
-  if (DEBUG_C) console.log(...args);
-}
+function cLog(...args) { if (DEBUG_C) console.log(...args); }
 
 function extractNumber(text, patterns) {
   for (const re of patterns) {
@@ -112,25 +112,10 @@ function extractNumber(text, patterns) {
   return null;
 }
 
-function guessAdmin(admin, text) {
-  const a = String(admin || "").trim();
-  if (a) return a;
-
-  const t = String(text || "");
-
-  // MacroDroid通知の省略/揺れを吸収
-  if (t.includes("ゆな")) return "ゆな";
-  if (t.includes("しおり")) return "しおり";
-  if (t.includes("パートナー") && t.includes("しおり")) return "しおり";
-
-  return "unknown";
-}
-
 function detectDirection(text) {
   const t = String(text || "");
   const u = t.toUpperCase();
 
-  // 通知は「GOLDロング」じゃなく「ロング」だけのことがあるので緩く判定
   const isLong =
     t.includes("ロング") ||
     u.includes("GOLD LONG") ||
@@ -145,16 +130,13 @@ function detectDirection(text) {
     u.includes("SELL") ||
     t.includes("売り");
 
-  // 両方入ってたら危険なので無視
   if (isLong && isShort) return "";
   if (!isLong && !isShort) return "";
-
   return isLong ? "BUY" : "SELL";
 }
 
-function parseEntrySlByAdmin(who, text) {
+function parseEntrySlByWho(who, text) {
   const t = String(text || "");
-  // 記号揺れ：⇒ => → : ： を全部許容
   const arrow = "[:：⇒=>→]";
 
   if (who === "ゆな") {
@@ -180,89 +162,94 @@ function parseEntrySlByAdmin(who, text) {
   return { entry: null, sl: null };
 }
 
-// ★★★ C本命：/signal/c ★★★
-app.post("/signal/c", (req, res) => {
-  if (!requireKey(req, res)) return;
-
-  let { room, admin, text, id, symbol } = req.body;
-
-  room = String(room || "");
-  admin = String(admin || "");
-  text = String(text || "");
+function queueCSignal({ room, who, text, symbol, id }) {
   symbol = normalizeSymbol(symbol || "GOLD");
-
-  // id が無い場合は作る（今回は重複防止しない）
   id = String(id || "");
   if (!id) id = "C-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
 
-  if (!text) {
-    cLog("[C] bad_request missing_text", { id, room, admin });
-    return res.status(400).json({
-      error: "missing fields",
-      required: ["text"],
-      received: req.body
-    });
-  }
-
-  // direction（BUY/SELL）
   const cmd = detectDirection(text);
-  if (!cmd) {
-    cLog("[C] ignored no_direction", { id, room, admin, text });
-    return res.json({ ok: true, ignored: "no_direction" });
-  }
+  if (!cmd) return { ok: true, ignored: "no_direction" };
 
-  // admin 推定
-  const who = guessAdmin(admin, text);
-
-  // 今回は「ゆな」「しおり」だけ
   if (who !== "ゆな" && who !== "しおり") {
-    cLog("[C] ignored admin_not_allowed", { id, room, who, admin, text });
-    return res.json({ ok: true, ignored: "admin_not_allowed", who, room });
+    return { ok: true, ignored: "who_not_allowed", who };
   }
 
-  // entry / sl（admin別のキーで拾う：仕様通り）
-  const { entry, sl } = parseEntrySlByAdmin(who, text);
-
+  const { entry, sl } = parseEntrySlByWho(who, text);
   if (entry == null || sl == null || Number.isNaN(entry) || Number.isNaN(sl)) {
-    cLog("[C] parse_failed", { id, room, who, cmd, text });
-    return res.status(400).json({
-      error: "parse_failed",
-      need: ["entry", "sl"],
-      who,
-      room,
-      received_text: text
-    });
+    return { ok: false, error: "parse_failed", need: ["entry", "sl"], who };
   }
 
-  // n=3固定（仕様）
-  const n = 3;
-
-  // ★重複防止はしない → 連投も全部通す
   const item = {
     cmd,
-    symbol: symbol || "GOLD",
+    symbol,
     id,
     entry,
     sl,
-    n,
+    n: 3,
     who,
-    room,
+    room: String(room || ""),
     ts: Date.now()
   };
 
   pushQueue(queueC, item);
-
   cLog("[C] queued", item);
-  return res.json({ ok: true, queued: true, size: queueC.length });
+  return { ok: true, queued: true, size: queueC.length };
+}
+
+// ===== C：JSON版（curl等で使う） =====
+app.post("/signal/c", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.body?.room || "");
+  const who  = String(req.body?.who  || req.body?.admin || ""); // adminでも受ける
+  const text = String(req.body?.text || "");
+  const symbol = req.body?.symbol || "GOLD";
+  const id = req.body?.id || "";
+
+  if (!text) return res.status(400).json({ error: "missing text" });
+
+  const out = queueCSignal({ room, who, text, symbol, id });
+  if (out.ok === false && out.error === "parse_failed") return res.status(400).json(out);
+  return res.json(out);
 });
 
-// 互換：旧 /signal/c_raw も /signal/c と同じ処理に流す
+// ===== C：Plain版（MacroDroid推奨：改行OK） =====
+// URL例：/signal/c_plain?key=...&who=しおり&room=...&symbol=GOLD&id=...
+app.post("/signal/c_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const who = String(req.query.who || "");      // ★ここで指定
+  const room = String(req.query.room || "");
+  const symbol = String(req.query.symbol || "GOLD");
+  const id = String(req.query.id || "");
+
+  // Body は text/plain の生本文（改行OK）
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const out = queueCSignal({ room, who, text, symbol, id });
+  if (out.ok === false && out.error === "parse_failed") return res.status(400).json(out);
+  return res.json(out);
+});
+
+// 互換：旧 /signal/c_raw も /signal/c と同じ処理に流す（残してOK）
 app.post("/signal/c_raw", (req, res) => {
   req.url = "/signal/c" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "");
   return app._router.handle(req, res, () => {});
 });
 
 app.get("/last/c", (req, res) => handleLast(req, res, queueC));
+
+
+// ★ JSONパースエラーを握って、ログだけ出して400返す（落ちないように）
+app.use((err, req, res, next) => {
+  if (err && err.type === "entity.parse.failed") {
+    console.log("[JSON_PARSE_ERROR]", err.message);
+    return res.status(400).json({ error: "invalid_json", message: err.message });
+  }
+  return next(err);
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Server running on port", port));
