@@ -1,7 +1,7 @@
 import express from "express";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ strict: true, limit: "1mb" }));
 
 const SECRET_KEY = process.env.SECRET_KEY;
 
