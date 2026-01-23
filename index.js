@@ -7,14 +7,6 @@ const SECRET_KEY = process.env.SECRET_KEY;
 
 // ===== 共通設定 =====
 const MAX_QUEUE = 200;
-const SEEN_TTL_MS = 5 * 60 * 1000;
-
-function cleanupSeen(seenMap) {
-  const now = Date.now();
-  for (const [id, ts] of seenMap.entries()) {
-    if (now - ts > SEEN_TTL_MS) seenMap.delete(id);
-  }
-}
 
 function requireKey(req, res) {
   const key = req.query.key;
@@ -49,12 +41,20 @@ const seenB = new Map();
 
 // ===== Queue C =====
 const queueC = [];
-const seenC = new Map();
 
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/B：汎用フォーマット受信 =====
+// ===== A/B：汎用フォーマット受信（なるべく変更しない） =====
+const SEEN_TTL_MS = 5 * 60 * 1000;
+
+function cleanupSeen(seenMap) {
+  const now = Date.now();
+  for (const [id, ts] of seenMap.entries()) {
+    if (now - ts > SEEN_TTL_MS) seenMap.delete(id);
+  }
+}
+
 function handleSignal(req, res, queue, seen) {
   if (!requireKey(req, res)) return;
 
@@ -94,7 +94,9 @@ app.get("/last/a", (req, res) => handleLast(req, res, queueA));
 app.post("/signal/b", (req, res) => handleSignal(req, res, queueB, seenB));
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
-// ===== C：raw本文を受け取り、entry/slを抽出してqueueCへ積む =====
+
+// ===== C：raw本文を受け取り、admin別に entry/sl を抽出して queueC へ積む =====
+
 function extractNumber(text, patterns) {
   for (const re of patterns) {
     const m = text.match(re);
@@ -103,67 +105,99 @@ function extractNumber(text, patterns) {
   return null;
 }
 
-app.post("/signal/c_raw", (req, res) => {
+function guessAdmin(admin, text) {
+  const a = String(admin || "").trim();
+  if (a) return a;
+
+  // 通知本文から推定（MacroDroidが admin:"" なのでここ重要）
+  if (text.includes("ゆな")) return "ゆな";
+  if (text.includes("しおり")) return "しおり";
+  // 「しおり(ゆなさんのパートナー」の表記揺れも吸収
+  if (text.includes("パートナー") && text.includes("しおり")) return "しおり";
+  return "unknown";
+}
+
+function detectDirection(text) {
+  const t = String(text || "");
+
+  // 必須条件：GOLDロング or GOLDショート が入ったときだけ反応させる（あなたの仕様通り）
+  const hasGoldLong = t.includes("GOLDロング") || t.includes("GOLD ロング");
+  const hasGoldShort = t.includes("GOLDショート") || t.includes("GOLD ショート");
+
+  // 念のため英語表記も吸収（通知が変化する可能性対策）
+  const hasLongEn = t.toUpperCase().includes("GOLD LONG");
+  const hasShortEn = t.toUpperCase().includes("GOLD SHORT");
+
+  const isLong = hasGoldLong || hasLongEn;
+  const isShort = hasGoldShort || hasShortEn;
+
+  if (!isLong && !isShort) return "";      // 方向なし
+  if (isLong && isShort) return "";        // 両方入ってたら危険なので無視
+  return isLong ? "BUY" : "SELL";
+}
+
+function parseEntrySlByAdmin(who, text) {
+  // admin別に拾うキーを固定（仕様通り、他は完全無視）
+  if (who === "ゆな") {
+    const entry = extractNumber(text, [
+      /エントリー\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    ]);
+    const sl = extractNumber(text, [
+      /損切\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    ]);
+    return { entry, sl };
+  }
+
+  if (who === "しおり") {
+    const entry = extractNumber(text, [
+      /\bEN\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    ]);
+    const sl = extractNumber(text, [
+      /\bSL\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    ]);
+    return { entry, sl };
+  }
+
+  return { entry: null, sl: null };
+}
+
+// ★★★ C本命：/signal/c ★★★
+app.post("/signal/c", (req, res) => {
   if (!requireKey(req, res)) return;
 
   let { room, admin, text, id, symbol } = req.body;
   room = String(room || "");
   admin = String(admin || "");
   text = String(text || "");
-  id = String(id || "");
   symbol = normalizeSymbol(symbol || "GOLD");
 
-  if (!id || !text) {
-    return res.status(400).json({ error: "missing fields", required: ["id", "text"], received: req.body });
+  // id は MacroDroid から来る想定だが、無い場合もサーバー側で作る（今回は重複防止しないので問題なし）
+  id = String(id || "");
+  if (!id) id = "C-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
+
+  if (!text) {
+    return res.status(400).json({
+      error: "missing fields",
+      required: ["text"],
+      received: req.body
+    });
   }
 
-  // ★重要：roomチェックは無効化（通知仕様でブレるため）
-  // if (room && room !== "ゆなのエントリー共有のへや") {
-  //   return res.json({ ok: true, ignored: "room_mismatch" });
-  // }
+  // direction（BUY/SELL）
+  const cmd = detectDirection(text);
+  if (!cmd) return res.json({ ok: true, ignored: "no_direction" });
 
-  // ロング/ショート判定
-const t = text.toUpperCase();
+  // admin 推定
+  const who = guessAdmin(admin, text);
 
-// より強い判定（日本語ブレ耐性）
-const isLong =
-  t.includes("ロング") ||
-  t.includes("LONG") ||
-  t.includes("GOLDロング") ||
-  t.includes("GOLD LONG");
-
-const isShort =
-  t.includes("ショート") ||
-  t.includes("SHORT") ||
-  t.includes("GOLDショート") ||
-  t.includes("GOLD SHORT");
-
-if (!isLong && !isShort) {
-  return res.json({ ok: true, ignored: "no_direction" });
-}
-
-const cmd = isLong ? "BUY" : "SELL";
-
-  if (!isLong && !isShort) {
-    return res.json({ ok: true, ignored: "no_direction" });
+  // 今回は「ゆな」と「しおり」だけを拾う（仕様）
+  if (who !== "ゆな" && who !== "しおり") {
+    return res.json({ ok: true, ignored: "admin_not_allowed", who, room });
   }
-  const cmd = isLong ? "BUY" : "SELL";
 
-  const who =
-    admin ||
-    (text.includes("ゆな") ? "ゆな" : (text.includes("しおり") ? "しおり" : "unknown"));
-
-  const entry = extractNumber(text, [
-    /エントリー\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i,
-    /\bEN\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
-  ]);
-
-  const sl = extractNumber(text, [
-    /損切\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i,
-    /\bSL\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
-  ]);
-
-  if (entry == null || sl == null) {
+  // entry / sl
+  const { entry, sl } = parseEntrySlByAdmin(who, text);
+  if (entry == null || sl == null || Number.isNaN(entry) || Number.isNaN(sl)) {
     return res.status(400).json({
       error: "parse_failed",
       need: ["entry", "sl"],
@@ -173,12 +207,10 @@ const cmd = isLong ? "BUY" : "SELL";
     });
   }
 
+  // n=3固定（仕様）
   const n = 3;
 
-  cleanupSeen(seenC);
-  if (seenC.has(id)) return res.json({ ok: true, deduped: true });
-  seenC.set(id, Date.now());
-
+  // ★重要：重複防止はしない → seenCは使わない（連投も全部通す）
   pushQueue(queueC, {
     cmd,
     symbol: symbol || "GOLD",
@@ -192,6 +224,15 @@ const cmd = isLong ? "BUY" : "SELL";
   });
 
   return res.json({ ok: true, queued: true, size: queueC.length });
+});
+
+// 互換：旧 /signal/c_raw も /signal/c と同じ処理に流す
+app.post("/signal/c_raw", (req, res) => {
+  // 中身同じにしたいので /signal/c の処理を再利用したいが、
+  // expressの都合上ここでは同処理を呼び直すのではなく、単純に同じ関数にしたい場合は上を関数化してください。
+  // ここでは一番安全に、req.urlだけ差し替えて処理する簡易転送にしています。
+  req.url = "/signal/c" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "");
+  return app._router.handle(req, res, () => {});
 });
 
 app.get("/last/c", (req, res) => handleLast(req, res, queueC));
