@@ -213,7 +213,7 @@ app.post("/signal/b_plain", (req, res) => {
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   // オプチャ名・管理人名チェック（安全に誤反応防止）
-  if (room && room !== "FX裁量EA配信【ゴールデン ランサーズ】コミュニティ") {
+  if (room && room !== "FX裁量EA配信【ゴールデン ランサーズ】 コミュニティ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
   if (who && who !== "Ally") {
