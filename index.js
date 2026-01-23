@@ -2,11 +2,8 @@ import express from "express";
 
 const app = express();
 
-// ★ここが重要：
-// 1) JSONは「application/json」のときだけ読む（MacroDroidは後で text/plain にする）
-// 2) text/plain を受け取れるようにする（改行OK）
-app.use(express.json({ strict: true, limit: "1mb" }));
-app.use(express.text({ type: "text/plain", limit: "1mb" }));
+// ★重要：全体に express.json() を掛けない（MacroDroidの壊れJSONで落ちないようにする）
+app.use(express.text({ type: "*/*", limit: "1mb" })); // 全リクエストをいったん「文字列」として受け取る
 
 const SECRET_KEY = process.env.SECRET_KEY;
 
@@ -93,10 +90,13 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-app.post("/signal/a", (req, res) => handleSignal(req, res, queueA, seenA));
+// ★A/Bは JSON をルート単位で適用
+const jsonParser = express.json({ strict: true, limit: "1mb" });
+
+app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
 app.get("/last/a", (req, res) => handleLast(req, res, queueA));
 
-app.post("/signal/b", (req, res) => handleSignal(req, res, queueB, seenB));
+app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, seenB));
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
 
@@ -196,12 +196,12 @@ function queueCSignal({ room, who, text, symbol, id }) {
   return { ok: true, queued: true, size: queueC.length };
 }
 
-// ===== C：JSON版（curl等で使う） =====
-app.post("/signal/c", (req, res) => {
+// ===== C：JSON版（curl用） =====
+app.post("/signal/c", jsonParser, (req, res) => {
   if (!requireKey(req, res)) return;
 
   const room = String(req.body?.room || "");
-  const who  = String(req.body?.who  || req.body?.admin || ""); // adminでも受ける
+  const who  = String(req.body?.who || req.body?.admin || "");
   const text = String(req.body?.text || "");
   const symbol = req.body?.symbol || "GOLD";
   const id = req.body?.id || "";
@@ -213,19 +213,17 @@ app.post("/signal/c", (req, res) => {
   return res.json(out);
 });
 
-// ===== C：Plain版（MacroDroid推奨：改行OK） =====
-// URL例：/signal/c_plain?key=...&who=しおり&room=...&symbol=GOLD&id=...
+// ===== C：Plain版（MacroDroid推奨） =====
 app.post("/signal/c_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
-  const who = String(req.query.who || "");      // ★ここで指定
+  const who = String(req.query.who || "");
   const room = String(req.query.room || "");
   const symbol = String(req.query.symbol || "GOLD");
   const id = String(req.query.id || "");
 
-  // Body は text/plain の生本文（改行OK）
+  // ここでは req.body は「生テキスト」（改行含めOK）
   const text = typeof req.body === "string" ? req.body : "";
-
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   const out = queueCSignal({ room, who, text, symbol, id });
@@ -233,23 +231,7 @@ app.post("/signal/c_plain", (req, res) => {
   return res.json(out);
 });
 
-// 互換：旧 /signal/c_raw も /signal/c と同じ処理に流す（残してOK）
-app.post("/signal/c_raw", (req, res) => {
-  req.url = "/signal/c" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "");
-  return app._router.handle(req, res, () => {});
-});
-
 app.get("/last/c", (req, res) => handleLast(req, res, queueC));
-
-
-// ★ JSONパースエラーを握って、ログだけ出して400返す（落ちないように）
-app.use((err, req, res, next) => {
-  if (err && err.type === "entity.parse.failed") {
-    console.log("[JSON_PARSE_ERROR]", err.message);
-    return res.status(400).json({ error: "invalid_json", message: err.message });
-  }
-  return next(err);
-});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Server running on port", port));
