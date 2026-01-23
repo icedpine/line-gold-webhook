@@ -190,7 +190,7 @@ app.post("/signal/a_plain", (req, res) => {
 
   // オプチャ名・管理人名チェック（安全に誤反応防止）
   // ※通知の表記ブレがあるなら、まずはコメントアウトして動作確認→必要なら緩める
-  if (room && room !== "【FX】さくらサロン") {
+  if (room && room !== "【FX】さくらサロンEA【裁量EA/自動売買】〈GOLD〉コピトレ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
   if (who && who !== "春音さくら") {
@@ -213,7 +213,7 @@ app.post("/signal/b_plain", (req, res) => {
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   // オプチャ名・管理人名チェック（安全に誤反応防止）
-  if (room && room !== "FX裁量配信【ゴールデンランサーズ】") {
+  if (room && room !== "FX裁量EA配信【ゴールデン ランサーズ】コミュニティ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
   if (who && who !== "Ally") {
