@@ -97,9 +97,16 @@ app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
 // ===== C：raw本文を受け取り、admin別に entry/sl を抽出して queueC へ積む =====
 
+// Renderログで切り分けできるようにする（必要なら false に）
+const DEBUG_C = true;
+
+function cLog(...args) {
+  if (DEBUG_C) console.log(...args);
+}
+
 function extractNumber(text, patterns) {
   for (const re of patterns) {
-    const m = text.match(re);
+    const m = String(text || "").match(re);
     if (m && m[1]) return Number(m[1]);
   }
   return null;
@@ -109,51 +116,63 @@ function guessAdmin(admin, text) {
   const a = String(admin || "").trim();
   if (a) return a;
 
-  // 通知本文から推定（MacroDroidが admin:"" なのでここ重要）
-  if (text.includes("ゆな")) return "ゆな";
-  if (text.includes("しおり")) return "しおり";
-  // 「しおり(ゆなさんのパートナー」の表記揺れも吸収
-  if (text.includes("パートナー") && text.includes("しおり")) return "しおり";
+  const t = String(text || "");
+
+  // MacroDroid通知の省略/揺れを吸収
+  if (t.includes("ゆな")) return "ゆな";
+  if (t.includes("しおり")) return "しおり";
+  if (t.includes("パートナー") && t.includes("しおり")) return "しおり";
+
   return "unknown";
 }
 
 function detectDirection(text) {
   const t = String(text || "");
+  const u = t.toUpperCase();
 
-  // 必須条件：GOLDロング or GOLDショート が入ったときだけ反応させる（あなたの仕様通り）
-  const hasGoldLong = t.includes("GOLDロング") || t.includes("GOLD ロング");
-  const hasGoldShort = t.includes("GOLDショート") || t.includes("GOLD ショート");
+  // 通知は「GOLDロング」じゃなく「ロング」だけのことがあるので緩く判定
+  const isLong =
+    t.includes("ロング") ||
+    u.includes("GOLD LONG") ||
+    u.includes("LONG") ||
+    u.includes("BUY") ||
+    t.includes("買い");
 
-  // 念のため英語表記も吸収（通知が変化する可能性対策）
-  const hasLongEn = t.toUpperCase().includes("GOLD LONG");
-  const hasShortEn = t.toUpperCase().includes("GOLD SHORT");
+  const isShort =
+    t.includes("ショート") ||
+    u.includes("GOLD SHORT") ||
+    u.includes("SHORT") ||
+    u.includes("SELL") ||
+    t.includes("売り");
 
-  const isLong = hasGoldLong || hasLongEn;
-  const isShort = hasGoldShort || hasShortEn;
+  // 両方入ってたら危険なので無視
+  if (isLong && isShort) return "";
+  if (!isLong && !isShort) return "";
 
-  if (!isLong && !isShort) return "";      // 方向なし
-  if (isLong && isShort) return "";        // 両方入ってたら危険なので無視
   return isLong ? "BUY" : "SELL";
 }
 
 function parseEntrySlByAdmin(who, text) {
-  // admin別に拾うキーを固定（仕様通り、他は完全無視）
+  const t = String(text || "");
+  // 記号揺れ：⇒ => → : ： を全部許容
+  const arrow = "[:：⇒=>→]";
+
   if (who === "ゆな") {
-    const entry = extractNumber(text, [
-      /エントリー\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    const entry = extractNumber(t, [
+      new RegExp(`エントリー\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
     ]);
-    const sl = extractNumber(text, [
-      /損切\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    const sl = extractNumber(t, [
+      new RegExp(`損切\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
     ]);
     return { entry, sl };
   }
 
   if (who === "しおり") {
-    const entry = extractNumber(text, [
-      /\bEN\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    const entry = extractNumber(t, [
+      new RegExp(`\\bEN\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
     ]);
-    const sl = extractNumber(text, [
-      /\bSL\s*[⇒=>]\s*([0-9]+(?:\.[0-9]+)?)/i
+    const sl = extractNumber(t, [
+      new RegExp(`\\bSL\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
     ]);
     return { entry, sl };
   }
@@ -166,16 +185,18 @@ app.post("/signal/c", (req, res) => {
   if (!requireKey(req, res)) return;
 
   let { room, admin, text, id, symbol } = req.body;
+
   room = String(room || "");
   admin = String(admin || "");
   text = String(text || "");
   symbol = normalizeSymbol(symbol || "GOLD");
 
-  // id は MacroDroid から来る想定だが、無い場合もサーバー側で作る（今回は重複防止しないので問題なし）
+  // id が無い場合は作る（今回は重複防止しない）
   id = String(id || "");
   if (!id) id = "C-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
 
   if (!text) {
+    cLog("[C] bad_request missing_text", { id, room, admin });
     return res.status(400).json({
       error: "missing fields",
       required: ["text"],
@@ -185,19 +206,25 @@ app.post("/signal/c", (req, res) => {
 
   // direction（BUY/SELL）
   const cmd = detectDirection(text);
-  if (!cmd) return res.json({ ok: true, ignored: "no_direction" });
+  if (!cmd) {
+    cLog("[C] ignored no_direction", { id, room, admin, text });
+    return res.json({ ok: true, ignored: "no_direction" });
+  }
 
   // admin 推定
   const who = guessAdmin(admin, text);
 
-  // 今回は「ゆな」と「しおり」だけを拾う（仕様）
+  // 今回は「ゆな」「しおり」だけ
   if (who !== "ゆな" && who !== "しおり") {
+    cLog("[C] ignored admin_not_allowed", { id, room, who, admin, text });
     return res.json({ ok: true, ignored: "admin_not_allowed", who, room });
   }
 
-  // entry / sl
+  // entry / sl（admin別のキーで拾う：仕様通り）
   const { entry, sl } = parseEntrySlByAdmin(who, text);
+
   if (entry == null || sl == null || Number.isNaN(entry) || Number.isNaN(sl)) {
+    cLog("[C] parse_failed", { id, room, who, cmd, text });
     return res.status(400).json({
       error: "parse_failed",
       need: ["entry", "sl"],
@@ -210,8 +237,8 @@ app.post("/signal/c", (req, res) => {
   // n=3固定（仕様）
   const n = 3;
 
-  // ★重要：重複防止はしない → seenCは使わない（連投も全部通す）
-  pushQueue(queueC, {
+  // ★重複防止はしない → 連投も全部通す
+  const item = {
     cmd,
     symbol: symbol || "GOLD",
     id,
@@ -221,16 +248,16 @@ app.post("/signal/c", (req, res) => {
     who,
     room,
     ts: Date.now()
-  });
+  };
 
+  pushQueue(queueC, item);
+
+  cLog("[C] queued", item);
   return res.json({ ok: true, queued: true, size: queueC.length });
 });
 
 // 互換：旧 /signal/c_raw も /signal/c と同じ処理に流す
 app.post("/signal/c_raw", (req, res) => {
-  // 中身同じにしたいので /signal/c の処理を再利用したいが、
-  // expressの都合上ここでは同処理を呼び直すのではなく、単純に同じ関数にしたい場合は上を関数化してください。
-  // ここでは一番安全に、req.urlだけ差し替えて処理する簡易転送にしています。
   req.url = "/signal/c" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "");
   return app._router.handle(req, res, () => {});
 });
