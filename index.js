@@ -3,7 +3,7 @@ import express from "express";
 const app = express();
 
 // ★重要：全体に express.json() を掛けない（MacroDroidの壊れJSONで落ちないようにする）
-app.use(express.text({ type: "*/*", limit: "1mb" })); // 全リクエストをいったん「文字列」として受け取る
+app.use(express.text({ type: "*/*", limit: "1mb" })); // 全リクエストを文字列で受ける
 
 const SECRET_KEY = process.env.SECRET_KEY;
 
@@ -47,7 +47,7 @@ const queueC = [];
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/B：汎用フォーマット受信（なるべく変更しない） =====
+// ===== A/B：汎用フォーマット受信 =====
 const SEEN_TTL_MS = 5 * 60 * 1000;
 
 function cleanupSeen(seenMap) {
@@ -62,26 +62,19 @@ function handleSignal(req, res, queue, seen) {
 
   let { cmd, symbol, id } = req.body;
   if (!cmd || !symbol || !id) {
-    return res.status(400).json({
-      error: "missing fields",
-      required: ["cmd", "symbol", "id"],
-      received: req.body
-    });
+    return res.status(400).json({ error: "missing fields" });
   }
 
   cmd = normalizeCmd(cmd);
   symbol = normalizeSymbol(symbol);
   id = String(id);
 
-  if (!cmd) return res.status(400).json({ error: "invalid cmd" });
-  if (!symbol) return res.status(400).json({ error: "invalid symbol" });
-
   cleanupSeen(seen);
   if (seen.has(id)) return res.json({ ok: true, deduped: true });
   seen.set(id, Date.now());
 
   pushQueue(queue, { cmd, symbol, id, ts: Date.now() });
-  return res.json({ ok: true, queued: true, size: queue.length });
+  return res.json({ ok: true, queued: true });
 }
 
 function handleLast(req, res, queue) {
@@ -90,7 +83,7 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-// ★A/Bは JSON をルート単位で適用
+// A/B は JSON をルート単位で
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
@@ -100,35 +93,24 @@ app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, s
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
 
-// ===== C：パース共通 =====
+// ===== C 共通 =====
 const DEBUG_C = true;
 function cLog(...args) { if (DEBUG_C) console.log(...args); }
 
 function extractNumber(text, patterns) {
   for (const re of patterns) {
-    const m = String(text || "").match(re);
+    const m = String(text).match(re);
     if (m && m[1]) return Number(m[1]);
   }
   return null;
 }
 
 function detectDirection(text) {
-  const t = String(text || "");
+  const t = String(text);
   const u = t.toUpperCase();
 
-  const isLong =
-    t.includes("ロング") ||
-    u.includes("GOLD LONG") ||
-    u.includes("LONG") ||
-    u.includes("BUY") ||
-    t.includes("買い");
-
-  const isShort =
-    t.includes("ショート") ||
-    u.includes("GOLD SHORT") ||
-    u.includes("SHORT") ||
-    u.includes("SELL") ||
-    t.includes("売り");
+  const isLong  = t.includes("ロング") || u.includes("LONG") || u.includes("BUY")  || t.includes("買い");
+  const isShort = t.includes("ショート") || u.includes("SHORT") || u.includes("SELL") || t.includes("売り");
 
   if (isLong && isShort) return "";
   if (!isLong && !isShort) return "";
@@ -136,98 +118,93 @@ function detectDirection(text) {
 }
 
 function parseEntrySlByWho(who, text) {
-  const t = String(text || "");
+  const t = String(text);
   const arrow = "[:：⇒=>→]";
 
   if (who === "ゆな") {
-    const entry = extractNumber(t, [
-      new RegExp(`エントリー\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
-    ]);
-    const sl = extractNumber(t, [
-      new RegExp(`損切\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
-    ]);
-    return { entry, sl };
+    return {
+      entry: extractNumber(t, [new RegExp(`エントリー\\s*${arrow}\\s*([0-9.]+)`, "i")]),
+      sl:    extractNumber(t, [new RegExp(`損切\\s*${arrow}\\s*([0-9.]+)`, "i")])
+    };
   }
 
   if (who === "しおり") {
-    const entry = extractNumber(t, [
-      new RegExp(`\\bEN\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
-    ]);
-    const sl = extractNumber(t, [
-      new RegExp(`\\bSL\\s*${arrow}\\s*([0-9]+(?:\\.[0-9]+)?)`, "i")
-    ]);
-    return { entry, sl };
+    return {
+      entry: extractNumber(t, [new RegExp(`\\bEN\\s*${arrow}\\s*([0-9.]+)`, "i")]),
+      sl:    extractNumber(t, [new RegExp(`\\bSL\\s*${arrow}\\s*([0-9.]+)`, "i")])
+    };
   }
 
   return { entry: null, sl: null };
 }
 
+// ===== ★追加：C 短期デデュープ =====
+const C_DEDUP_MS = 2000;
+const cRecent = new Map();
+
+function makeDedupKey(item) {
+  return `${item.who}|${item.cmd}|${item.symbol}|${item.entry}|${item.sl}`;
+}
+
+function isDuplicateAndMark(key) {
+  const now = Date.now();
+  const prev = cRecent.get(key) || 0;
+
+  for (const [k, ts] of cRecent.entries()) {
+    if (now - ts > C_DEDUP_MS * 5) cRecent.delete(k);
+  }
+
+  if (now - prev < C_DEDUP_MS) return true;
+  cRecent.set(key, now);
+  return false;
+}
+
 function queueCSignal({ room, who, text, symbol, id }) {
   symbol = normalizeSymbol(symbol || "GOLD");
-  id = String(id || "");
-  if (!id) id = "C-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
+  if (!id) id = "C-" + Date.now() + "-" + Math.random();
 
   const cmd = detectDirection(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
   if (who !== "ゆな" && who !== "しおり") {
-    return { ok: true, ignored: "who_not_allowed", who };
+    return { ok: true, ignored: "who_not_allowed" };
   }
 
   const { entry, sl } = parseEntrySlByWho(who, text);
-  if (entry == null || sl == null || Number.isNaN(entry) || Number.isNaN(sl)) {
-    return { ok: false, error: "parse_failed", need: ["entry", "sl"], who };
-  }
+  if (!entry || !sl) return { ok: false, error: "parse_failed" };
 
-  const item = {
-    cmd,
-    symbol,
-    id,
-    entry,
-    sl,
-    n: 3,
-    who,
-    room: String(room || ""),
-    ts: Date.now()
-  };
+  const item = { cmd, symbol, id, entry, sl, n: 3, who, room, ts: Date.now() };
+
+  const dkey = makeDedupKey(item);
+  if (isDuplicateAndMark(dkey)) {
+    cLog("[C] dedup_short", dkey);
+    return { ok: true, deduped: true };
+  }
 
   pushQueue(queueC, item);
   cLog("[C] queued", item);
-  return { ok: true, queued: true, size: queueC.length };
+  return { ok: true, queued: true };
 }
 
-// ===== C：JSON版（curl用） =====
+// ===== C：JSON（curl用） =====
 app.post("/signal/c", jsonParser, (req, res) => {
   if (!requireKey(req, res)) return;
-
-  const room = String(req.body?.room || "");
-  const who  = String(req.body?.who || req.body?.admin || "");
-  const text = String(req.body?.text || "");
-  const symbol = req.body?.symbol || "GOLD";
-  const id = req.body?.id || "";
-
-  if (!text) return res.status(400).json({ error: "missing text" });
-
-  const out = queueCSignal({ room, who, text, symbol, id });
-  if (out.ok === false && out.error === "parse_failed") return res.status(400).json(out);
+  const out = queueCSignal(req.body);
   return res.json(out);
 });
 
-// ===== C：Plain版（MacroDroid推奨） =====
+// ===== C：Plain（MacroDroid用） =====
 app.post("/signal/c_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
-  const who = String(req.query.who || "");
-  const room = String(req.query.room || "");
-  const symbol = String(req.query.symbol || "GOLD");
-  const id = String(req.query.id || "");
+  const out = queueCSignal({
+    who: req.query.who,
+    room: req.query.room,
+    symbol: req.query.symbol,
+    id: req.query.id,
+    text: typeof req.body === "string" ? req.body : ""
+  });
 
-  // ここでは req.body は「生テキスト」（改行含めOK）
-  const text = typeof req.body === "string" ? req.body : "";
-  if (!text) return res.status(400).json({ error: "missing body text" });
-
-  const out = queueCSignal({ room, who, text, symbol, id });
-  if (out.ok === false && out.error === "parse_failed") return res.status(400).json(out);
   return res.json(out);
 });
 
