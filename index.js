@@ -137,10 +137,9 @@ function detectDirectionA(text) {
   return "";
 }
 
-// B専用：文言でBUY/SELL判定
+// B専用：文言でBUY/SELL判定（※これは /signal/b_plain では使わない。旧ロジック互換用に残す）
 function detectDirectionB(text) {
   const t = String(text || "");
-  // Allyのメッセージ例に寄せる（誤反応防止）
   if (t.includes("ゴールドロング") && (t.includes("成行買い") || t.includes("買い"))) return "BUY";
   if (t.includes("ゴールドショート") && (t.includes("成行売り") || t.includes("売り"))) return "SELL";
   return "";
@@ -201,13 +200,40 @@ app.post("/signal/a_plain", (req, res) => {
   return res.json(out);
 });
 
+
+// =====================================================
+// ★B：2段階（方向→スタンプで発注）ここだけ新実装
+// =====================================================
+
+// ★スタンバイ有効期限（例：10分）
+const B_STANDBY_TTL_MS = 10 * 60 * 1000;
+
+// 最後に受けたスタンバイ（1つだけ保持でOKという前提）
+let bStandby = null;
+// bStandby = { cmd: "BUY"|"SELL", symbol: "GOLD", room, who, ts }
+
+// 方向スタンバイ判定
+function detectStandbyB(text) {
+  const t = String(text || "");
+  if (t.includes("ゴールドロング") && t.includes("成行買い")) return "BUY";
+  if (t.includes("ゴールドショート") && t.includes("成行売り")) return "SELL";
+  return "";
+}
+
+// スタンプ通知判定
+function isStampTriggerB(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  // 通知の表記ゆれ対策：この部分が入っていればOK
+  return t.includes("スタンプを送信しました");
+}
+
 // ===== B：Plain（MacroDroid）=====
 app.post("/signal/b_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
   const room = String(req.query.room || "");
   const who = String(req.query.who || "");
-  const symbol = String(req.query.symbol || "GOLD");
+  const symbol = normalizeSymbol(String(req.query.symbol || "GOLD"));
   const text = typeof req.body === "string" ? req.body : "";
 
   if (!text) return res.status(400).json({ error: "missing body text" });
@@ -220,8 +246,51 @@ app.post("/signal/b_plain", (req, res) => {
     return res.json({ ok: true, ignored: "who_mismatch", who });
   }
 
-  const out = queueABSignal({ channel: "B", room, who, text, symbol });
-  return res.json(out);
+  // 1) 方向メッセージ → スタンバイする（発注しない）
+  const standbyCmd = detectStandbyB(text);
+  if (standbyCmd) {
+    bStandby = { cmd: standbyCmd, symbol, room, who, ts: Date.now() };
+    return res.json({ ok: true, standby: true, cmd: standbyCmd });
+  }
+
+  // 2) スタンプ通知 → スタンバイがあれば発注（queueBへ積む）
+  if (isStampTriggerB(text)) {
+    if (!bStandby) return res.json({ ok: true, ignored: "no_standby" });
+
+    // TTLチェック
+    if (Date.now() - bStandby.ts > B_STANDBY_TTL_MS) {
+      bStandby = null;
+      return res.json({ ok: true, ignored: "standby_expired" });
+    }
+
+    const cmd = bStandby.cmd;
+    const sym = bStandby.symbol || "GOLD";
+
+    // 連続通知対策（同一通知の二重POSTだけ軽く潰す）
+    const dkey = abMakeDedupKey({
+      channel: "B",
+      who,
+      room,
+      cmd,
+      symbol: sym,
+      text
+    });
+    if (abIsDuplicateAndMark(dkey)) {
+      return res.json({ ok: true, deduped: true, reason: "short_window" });
+    }
+
+    // ★ここで初めてキューに積む → EAが /last/b で拾って成行1本
+    const item = { cmd, symbol: sym, id: safeId("B"), ts: Date.now() };
+    pushQueue(queueB, item);
+
+    // スタンバイ消去（次の方向待ち）
+    bStandby = null;
+
+    return res.json({ ok: true, queued: true, cmd, size: queueB.length });
+  }
+
+  // その他のメッセージは無視
+  return res.json({ ok: true, ignored: "no_match" });
 });
 
 
