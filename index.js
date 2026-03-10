@@ -26,7 +26,15 @@ function normalizeCmd(cmd) {
 
 function normalizeSymbol(symbol) {
   let s = String(symbol || "").trim().toUpperCase();
-  if (s === "XAUUSD" || s === "XAUUSD#" || s === "XAU/USD" || s === "GOLD") s = "GOLD";
+
+  // GOLD
+  if (s === "XAUUSD" || s === "XAUUSD#" || s === "XAU/USD" || s === "GOLD")
+    return "GOLD";
+
+  // USDJPY
+  if (s === "USDJPY" || s === "USD/JPY")
+    return "USDJPY";
+
   return s;
 }
 
@@ -132,8 +140,8 @@ function abIsDuplicateAndMark(key) {
 function detectDirectionA(text) {
   const t = String(text || "");
   // 仕様通り：固定フレーズに寄せる（誤反応防止）
-  if (t.includes("ゴールドロングエントリー")) return "BUY";
-  if (t.includes("ゴールドショートエントリー")) return "SELL";
+  if (t.includes("USDJPYロングエントリー")) return "BUY";
+  if (t.includes("USDJPYショートエントリー")) return "SELL";
   return "";
 }
 
@@ -182,14 +190,14 @@ app.post("/signal/a_plain", (req, res) => {
 
   const room = String(req.query.room || "");
   const who = String(req.query.who || "");
-  const symbol = String(req.query.symbol || "GOLD");
+  const symbol = String(req.query.symbol || "USDJPY");
   const text = typeof req.body === "string" ? req.body : "";
 
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   // オプチャ名・管理人名チェック（安全に誤反応防止）
   // ※通知の表記ブレがあるなら、まずはコメントアウトして動作確認→必要なら緩める
-  if (room && room !== "【FX】さくらサロンEA【裁量EA/自動売買】〈GOLD〉コピトレ") {
+  if (room && room !== "【FXドル円】さくらサロンEA【裁量EA/自動売買】〈GOLD〉コピトレ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
   if (who && who !== "春音さくら") {
