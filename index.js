@@ -354,9 +354,9 @@ app.post("/signal/d_plain", (req, res) => {
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   // Discord通知の送信者名チェック
-  if (who && who !== "ぼっち半裁量シグナル用 #mt4-alerts: MT4-Bocchi Alerts") {
-    return res.json({ ok: true, ignored: "who_mismatch", who });
-  }
+  // if (who && who !== "ぼっち半裁量シグナル用 #mt4-alerts: MT4-Bocchi Alerts") {
+  //   return res.json({ ok: true, ignored: "who_mismatch", who });
+  // }
 
   const out = queueDSignal({ room, who, text, symbol });
   return res.json(out);
