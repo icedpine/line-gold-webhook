@@ -163,8 +163,8 @@ function detectDirectionB(text) {
 // ★追加：D専用
 function detectDirectionD(text) {
   const t = String(text || "");
-  if (t.includes("エントリーサイン") && t.includes("BUY")) return "BUY";
-  if (t.includes("エントリーサイン") && t.includes("SELL")) return "SELL";
+  if (t.includes("スタンバイサイン") && t.includes("BUY")) return "BUY";
+  if (t.includes("スタンバイサイン") && t.includes("SELL")) return "SELL";
   return "";
 }
 
