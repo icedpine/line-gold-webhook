@@ -205,13 +205,13 @@ function queueABSignal({ channel, room, who, text, symbol }) {
 
 // ★追加：D専用（A/Bを壊さないため別関数）
 function queueDSignal({ room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "GOLD");
+  symbol = normalizeSymbol(symbol || "GOLDmicro");
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
 
-  // DはGOLD固定にしておく
-  symbol = "GOLD";
+  // DはGOLDmicro固定
+  symbol = "GOLDmicro";
 
   const cmd = detectDirectionD(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
@@ -348,7 +348,7 @@ app.post("/signal/d_plain", (req, res) => {
 
   const room = String(req.query.room || "");
   const who = String(req.query.who || "");
-  const symbol = String(req.query.symbol || "GOLD");
+  const symbol = String(req.query.symbol || "GOLDmicro");
   const text = typeof req.body === "string" ? req.body : "";
 
   if (!text) return res.status(400).json({ error: "missing body text" });
