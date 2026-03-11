@@ -47,7 +47,7 @@ function safeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
 
-// ===== Queue A/B/C =====
+// ===== Queue A/B/C/D =====
 const queueA = [];
 const seenA = new Map();
 
@@ -56,10 +56,14 @@ const seenB = new Map();
 
 const queueC = [];
 
+// ★追加：D
+const queueD = [];
+const seenD = new Map();
+
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/B：汎用フォーマット受信（既存互換で残す） =====
+// ===== A/B/D：汎用フォーマット受信（既存互換で残す） =====
 const SEEN_TTL_MS = 5 * 60 * 1000;
 
 function cleanupSeen(seenMap) {
@@ -98,7 +102,7 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-// A/B は JSON をルート単位で（curl/手動送信用）
+// A/B/D は JSON をルート単位で（curl/手動送信用）
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
@@ -106,6 +110,10 @@ app.get("/last/a", (req, res) => handleLast(req, res, queueA));
 
 app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, seenB));
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
+
+// ★追加：D
+app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
+app.get("/last/d", (req, res) => handleLast(req, res, queueD));
 
 
 // =========================================================
@@ -139,7 +147,6 @@ function abIsDuplicateAndMark(key) {
 // A専用：文言でBUY/SELL判定
 function detectDirectionA(text) {
   const t = String(text || "");
-  // 仕様通り：固定フレーズに寄せる（誤反応防止）
   if (t.includes("USDJPYロングエントリー")) return "BUY";
   if (t.includes("USDJPYショートエントリー")) return "SELL";
   return "";
@@ -150,6 +157,14 @@ function detectDirectionB(text) {
   const t = String(text || "");
   if (t.includes("ゴールドロング") && (t.includes("成行買い") || t.includes("買い"))) return "BUY";
   if (t.includes("ゴールドショート") && (t.includes("成行売り") || t.includes("売り"))) return "SELL";
+  return "";
+}
+
+// ★追加：D専用
+function detectDirectionD(text) {
+  const t = String(text || "");
+  if (t.includes("エントリーサイン") && t.includes("BUY")) return "BUY";
+  if (t.includes("エントリーサイン") && t.includes("SELL")) return "SELL";
   return "";
 }
 
@@ -188,6 +203,35 @@ function queueABSignal({ channel, room, who, text, symbol }) {
   return { ok: true, queued: true, size: channel === "A" ? queueA.length : queueB.length };
 }
 
+// ★追加：D専用（A/Bを壊さないため別関数）
+function queueDSignal({ room, who, text, symbol }) {
+  symbol = normalizeSymbol(symbol || "GOLD");
+  room = String(room || "");
+  who = String(who || "");
+  text = String(text || "");
+
+  // DはGOLD固定にしておく
+  symbol = "GOLD";
+
+  const cmd = detectDirectionD(text);
+  if (!cmd) return { ok: true, ignored: "no_direction" };
+
+  const item = {
+    cmd,
+    symbol,
+    id: safeId("D"),
+    room,
+    who,
+    ts: Date.now()
+  };
+
+  const dkey = abMakeDedupKey({ channel: "D", who, room, cmd, symbol, text });
+  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
+
+  pushQueue(queueD, item);
+  return { ok: true, queued: true, size: queueD.length };
+}
+
 // ===== A：Plain（MacroDroid）=====
 app.post("/signal/a_plain", (req, res) => {
   if (!requireKey(req, res)) return;
@@ -199,8 +243,6 @@ app.post("/signal/a_plain", (req, res) => {
 
   if (!text) return res.status(400).json({ error: "missing body text" });
 
-  // オプチャ名・管理人名チェック（安全に誤反応防止）
-  // ※通知の表記ブレがあるなら、まずはコメントアウトして動作確認→必要なら緩める
   if (room && room !== "【FXドル円】さくらサロンEA【裁量EA/自動売買】〈GOLD〉コピトレ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
@@ -235,7 +277,6 @@ function detectStandbyB(text) {
 // スタンプ通知判定
 function isStampTriggerB(text) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
-  // 通知の表記ゆれ対策：この部分が入っていればOK
   return t.includes("スタンプを送信しました");
 }
 
@@ -250,7 +291,6 @@ app.post("/signal/b_plain", (req, res) => {
 
   if (!text) return res.status(400).json({ error: "missing body text" });
 
-  // オプチャ名・管理人名チェック（安全に誤反応防止）
   if (room && room !== "FX裁量EA配信【ゴールデン ランサーズ】コミュニティ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
@@ -258,18 +298,15 @@ app.post("/signal/b_plain", (req, res) => {
     return res.json({ ok: true, ignored: "who_mismatch", who });
   }
 
-  // 1) 方向メッセージ → スタンバイする（発注しない）
   const standbyCmd = detectStandbyB(text);
   if (standbyCmd) {
     bStandby = { cmd: standbyCmd, symbol, room, who, ts: Date.now() };
     return res.json({ ok: true, standby: true, cmd: standbyCmd });
   }
 
-  // 2) スタンプ通知 → スタンバイがあれば発注（queueBへ積む）
   if (isStampTriggerB(text)) {
     if (!bStandby) return res.json({ ok: true, ignored: "no_standby" });
 
-    // TTLチェック
     if (Date.now() - bStandby.ts > B_STANDBY_TTL_MS) {
       bStandby = null;
       return res.json({ ok: true, ignored: "standby_expired" });
@@ -278,7 +315,6 @@ app.post("/signal/b_plain", (req, res) => {
     const cmd = bStandby.cmd;
     const sym = bStandby.symbol || "GOLD";
 
-    // 連続通知対策（同一通知の二重POSTだけ軽く潰す）
     const dkey = abMakeDedupKey({
       channel: "B",
       who,
@@ -291,18 +327,39 @@ app.post("/signal/b_plain", (req, res) => {
       return res.json({ ok: true, deduped: true, reason: "short_window" });
     }
 
-    // ★ここで初めてキューに積む → EAが /last/b で拾って成行1本
     const item = { cmd, symbol: sym, id: safeId("B"), ts: Date.now() };
     pushQueue(queueB, item);
 
-    // スタンバイ消去（次の方向待ち）
     bStandby = null;
 
     return res.json({ ok: true, queued: true, cmd, size: queueB.length });
   }
 
-  // その他のメッセージは無視
   return res.json({ ok: true, ignored: "no_match" });
+});
+
+
+// =====================================================
+// ★D：Discord（ぼっちグループ）
+// =====================================================
+
+app.post("/signal/d_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLD");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  // Discord通知の送信者名チェック
+  if (who && who !== "ぼっち半裁量シグナル用 #mt4-alerts: MT4-Bocchi Alerts") {
+    return res.json({ ok: true, ignored: "who_mismatch", who });
+  }
+
+  const out = queueDSignal({ room, who, text, symbol });
+  return res.json(out);
 });
 
 
