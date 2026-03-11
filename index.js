@@ -159,13 +159,17 @@ function queueABSignal({ channel, room, who, text, symbol }) {
   who = String(who || "");
   text = String(text || "");
 
+  // ★AはUSDJPY固定
+  if (channel === "A") {
+    symbol = "USDJPY";
+  }
+
   let cmd = "";
   if (channel === "A") cmd = detectDirectionA(text);
   if (channel === "B") cmd = detectDirectionB(text);
 
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
-  // キューへ
   const item = {
     cmd,
     symbol,
