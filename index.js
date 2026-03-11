@@ -246,7 +246,7 @@ app.post("/signal/a_plain", (req, res) => {
   if (room && room !== "【FXドル円】さくらサロンEA【裁量EA/自動売買】〈GOLD〉コピトレ") {
     return res.json({ ok: true, ignored: "room_mismatch", room });
   }
-  if (who && who !== "春音さくら") {
+  if (who && who !== "春音 さくら") {
     return res.json({ ok: true, ignored: "who_mismatch", who });
   }
 
