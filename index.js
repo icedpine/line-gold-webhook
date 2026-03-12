@@ -47,7 +47,7 @@ function safeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
 
-// ===== Queue A/B/C/D =====
+// ===== Queue A/B/C/D/E =====
 const queueA = [];
 const seenA = new Map();
 
@@ -56,14 +56,17 @@ const seenB = new Map();
 
 const queueC = [];
 
-// ★追加：D
 const queueD = [];
 const seenD = new Map();
+
+// ★追加：E
+const queueE = [];
+const seenE = new Map();
 
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/B/D：汎用フォーマット受信（既存互換で残す） =====
+// ===== A/B/D/E：汎用フォーマット受信（既存互換で残す） =====
 const SEEN_TTL_MS = 5 * 60 * 1000;
 
 function cleanupSeen(seenMap) {
@@ -102,7 +105,7 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-// A/B/D は JSON をルート単位で（curl/手動送信用）
+// A/B/D/E は JSON をルート単位で（curl/手動送信用）
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
@@ -111,9 +114,12 @@ app.get("/last/a", (req, res) => handleLast(req, res, queueA));
 app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, seenB));
 app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 
-// ★追加：D
 app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
 app.get("/last/d", (req, res) => handleLast(req, res, queueD));
+
+// ★追加：E
+app.post("/signal/e", jsonParser, (req, res) => handleSignal(req, res, queueE, seenE));
+app.get("/last/e", (req, res) => handleLast(req, res, queueE));
 
 
 // =========================================================
@@ -125,7 +131,6 @@ const AB_DEDUP_MS = 2000;
 const abRecent = new Map();
 
 function abMakeDedupKey({ channel, who, room, cmd, symbol, text }) {
-  // textは同一通知判定に少しだけ使う（長すぎないように先頭だけ）
   const t = String(text || "").replace(/\s+/g, " ").trim().slice(0, 120);
   return `${channel}|${who}|${room}|${cmd}|${symbol}|${t}`;
 }
@@ -134,7 +139,6 @@ function abIsDuplicateAndMark(key) {
   const now = Date.now();
   const prev = abRecent.get(key) || 0;
 
-  // 軽い掃除
   for (const [k, ts] of abRecent.entries()) {
     if (now - ts > AB_DEDUP_MS * 5) abRecent.delete(k);
   }
@@ -160,11 +164,19 @@ function detectDirectionB(text) {
   return "";
 }
 
-// ★追加：D専用
+// D専用
 function detectDirectionD(text) {
   const t = String(text || "");
   if (t.includes("スタンバイサイン") && t.includes("BUY")) return "BUY";
   if (t.includes("スタンバイサイン") && t.includes("SELL")) return "SELL";
+  return "";
+}
+
+// ★追加：E専用
+function detectDirectionE(text) {
+  const t = String(text || "");
+  if (t.includes("BUY signal")) return "BUY";
+  if (t.includes("SELL signal")) return "SELL";
   return "";
 }
 
@@ -174,7 +186,6 @@ function queueABSignal({ channel, room, who, text, symbol }) {
   who = String(who || "");
   text = String(text || "");
 
-  // ★AはUSDJPY固定
   if (channel === "A") {
     symbol = "USDJPY";
   }
@@ -203,7 +214,6 @@ function queueABSignal({ channel, room, who, text, symbol }) {
   return { ok: true, queued: true, size: channel === "A" ? queueA.length : queueB.length };
 }
 
-// ★追加：D専用（A/Bを壊さないため別関数）
 function queueDSignal({ room, who, text, symbol }) {
   symbol = normalizeSymbol(symbol || "GOLDmicro");
   room = String(room || "");
@@ -230,6 +240,35 @@ function queueDSignal({ room, who, text, symbol }) {
 
   pushQueue(queueD, item);
   return { ok: true, queued: true, size: queueD.length };
+}
+
+// ★追加：E専用
+function queueESignal({ room, who, text, symbol }) {
+  symbol = normalizeSymbol(symbol || "GOLDmicro");
+  room = String(room || "");
+  who = String(who || "");
+  text = String(text || "");
+
+  // EはGOLD固定
+  symbol = "GOLDmicro";
+
+  const cmd = detectDirectionE(text);
+  if (!cmd) return { ok: true, ignored: "no_direction" };
+
+  const item = {
+    cmd,
+    symbol,
+    id: safeId("E"),
+    room,
+    who,
+    ts: Date.now()
+  };
+
+  const dkey = abMakeDedupKey({ channel: "E", who, room, cmd, symbol, text });
+  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
+
+  pushQueue(queueE, item);
+  return { ok: true, queued: true, size: queueE.length };
 }
 
 // ===== A：Plain（MacroDroid）=====
@@ -259,14 +298,9 @@ app.post("/signal/a_plain", (req, res) => {
 // ★B：2段階（方向→スタンプで発注）ここだけ新実装
 // =====================================================
 
-// ★スタンバイ有効期限（例：10分）
 const B_STANDBY_TTL_MS = 10 * 60 * 1000;
-
-// 最後に受けたスタンバイ（1つだけ保持でOKという前提）
 let bStandby = null;
-// bStandby = { cmd: "BUY"|"SELL", symbol: "GOLD", room, who, ts }
 
-// 方向スタンバイ判定
 function detectStandbyB(text) {
   const t = String(text || "");
   if (t.includes("ゴールドロング") && t.includes("成行買い")) return "BUY";
@@ -274,13 +308,11 @@ function detectStandbyB(text) {
   return "";
 }
 
-// スタンプ通知判定
 function isStampTriggerB(text) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   return t.includes("スタンプを送信しました");
 }
 
-// ===== B：Plain（MacroDroid）=====
 app.post("/signal/b_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -353,12 +385,26 @@ app.post("/signal/d_plain", (req, res) => {
 
   if (!text) return res.status(400).json({ error: "missing body text" });
 
-  // Discord通知の送信者名チェック
-  // if (who && who !== "ぼっち半裁量シグナル用 #mt4-alerts: MT4-Bocchi Alerts") {
-  //   return res.json({ ok: true, ignored: "who_mismatch", who });
-  // }
-
   const out = queueDSignal({ room, who, text, symbol });
+  return res.json(out);
+});
+
+
+// =====================================================
+// ★E：Discord（XAUUSD signal）
+// =====================================================
+
+app.post("/signal/e_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLDmicro");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const out = queueESignal({ room, who, text, symbol });
   return res.json(out);
 });
 
@@ -389,10 +435,6 @@ function detectDirection(text) {
   return isLong ? "BUY" : "SELL";
 }
 
-/**
- *  - ゆな：利確 ⇒ の値をTPにする
- *  - しおり：TP1 ⇒ の値をTPにする
- */
 function parseEntrySlTpByWho(who, text) {
   const t = String(text);
   const arrow = "[:：⇒=>→]";
@@ -414,7 +456,6 @@ function parseEntrySlTpByWho(who, text) {
   return { entry: null, sl: null, tp: null };
 }
 
-// ===== ★C 短期デデュープ =====
 const C_DEDUP_MS = 2000;
 const cRecent = new Map();
 
@@ -462,14 +503,12 @@ function queueCSignal({ room, who, text, symbol, id }) {
   return { ok: true, queued: true };
 }
 
-// ===== C：JSON（curl用） =====
 app.post("/signal/c", jsonParser, (req, res) => {
   if (!requireKey(req, res)) return;
   const out = queueCSignal(req.body);
   return res.json(out);
 });
 
-// ===== C：Plain（MacroDroid用） =====
 app.post("/signal/c_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
