@@ -59,9 +59,13 @@ const queueC = [];
 const queueD = [];
 const seenD = new Map();
 
-// ★追加：E
+// ★追加：E(Ayanobil)
 const queueE = [];
 const seenE = new Map();
+
+// ★追加：F(Shabasu)
+const queueF = [];
+const seenF = new Map();
 
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
@@ -117,10 +121,13 @@ app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
 app.get("/last/d", (req, res) => handleLast(req, res, queueD));
 
-// ★追加：E
+// ★追加：E(Ayanobil)
 app.post("/signal/e", jsonParser, (req, res) => handleSignal(req, res, queueE, seenE));
 app.get("/last/e", (req, res) => handleLast(req, res, queueE));
 
+// ★追加：F(Shabasu)
+app.post("/signal/f", jsonParser, (req, res) => handleSignal(req, res, queueF, seenF));
+app.get("/last/f", (req, res) => handleLast(req, res, queueF));
 
 // =========================================================
 // ===== A/B：Cと同じ “Plain運用” を追加（MacroDroid推奨）=====
@@ -179,6 +186,15 @@ function detectDirectionE(text) {
   if (t.includes("SELL signal")) return "SELL";
   return "";
 }
+
+// ★追加：F専用
+function detectDirectionF(text) {
+  const t = String(text || "");
+  if (t.includes("BUY signal")) return "BUY";
+  if (t.includes("SELL signal")) return "SELL";
+  return "";
+}
+
 
 function queueABSignal({ channel, room, who, text, symbol }) {
   symbol = normalizeSymbol(symbol || "GOLD");
@@ -270,6 +286,36 @@ function queueESignal({ room, who, text, symbol }) {
   pushQueue(queueE, item);
   return { ok: true, queued: true, size: queueE.length };
 }
+
+// ★追加：F専用
+function queueFSignal({ room, who, text, symbol }) {
+  symbol = normalizeSymbol(symbol || "GOLDmicro");
+  room = String(room || "");
+  who = String(who || "");
+  text = String(text || "");
+
+  // FはGOLDmicro固定
+  symbol = "GOLDmicro";
+
+  const cmd = detectDirectionE(text);
+  if (!cmd) return { ok: true, ignored: "no_direction" };
+
+  const item = {
+    cmd,
+    symbol,
+    id: safeId("F"),
+    room,
+    who,
+    ts: Date.now()
+  };
+
+  const dkey = abMakeDedupKey({ channel: "F", who, room, cmd, symbol, text });
+  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
+
+  pushQueue(queueF, item);
+  return { ok: true, queued: true, size: queueF.length };
+}
+
 
 // ===== A：Plain（MacroDroid）=====
 app.post("/signal/a_plain", (req, res) => {
@@ -391,7 +437,7 @@ app.post("/signal/d_plain", (req, res) => {
 
 
 // =====================================================
-// ★E：Discord（XAUUSD signal）
+// ★E：Discord（XAUUSD Ayanobil signal）
 // =====================================================
 
 app.post("/signal/e_plain", (req, res) => {
@@ -405,6 +451,24 @@ app.post("/signal/e_plain", (req, res) => {
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   const out = queueESignal({ room, who, text, symbol });
+  return res.json(out);
+});
+
+// =====================================================
+// ★F：Discord（XAUUSD Shabasu signal）
+// =====================================================
+
+app.post("/signal/f_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLDmicro");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const out = queueFSignal({ room, who, text, symbol });
   return res.json(out);
 });
 
