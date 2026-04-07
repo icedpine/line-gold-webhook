@@ -115,7 +115,7 @@ function abIsDuplicateAndMark(key) {
   return false;
 }
 
-// ===== Queue A/D/E/F =====
+// ===== Queue A/D/E/F/G =====
 const queueA = [];
 const seenA = new Map();
 
@@ -128,10 +128,14 @@ const seenE = new Map();
 const queueF = [];
 const seenF = new Map();
 
+// ★追加：G
+const queueG = [];
+const seenG = new Map();
+
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/D/E/F：汎用フォーマット受信 =====
+// ===== A/D/E/F/G：汎用フォーマット受信 =====
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
@@ -145,6 +149,10 @@ app.get("/last/e", (req, res) => handleLast(req, res, queueE));
 
 app.post("/signal/f", jsonParser, (req, res) => handleSignal(req, res, queueF, seenF));
 app.get("/last/f", (req, res) => handleLast(req, res, queueF));
+
+// ★追加：G
+app.post("/signal/g", jsonParser, (req, res) => handleSignal(req, res, queueG, seenG));
+app.get("/last/g", (req, res) => handleLast(req, res, queueG));
 
 // A専用
 function detectDirectionA(text) {
@@ -172,6 +180,14 @@ function detectDirectionE(text) {
 
 // F専用
 function detectDirectionF(text) {
+  const t = String(text || "");
+  if (t.includes("BUY signal")) return "BUY";
+  if (t.includes("SELL signal")) return "SELL";
+  return "";
+}
+
+// ★追加：G専用
+function detectDirectionG(text) {
   const t = String(text || "");
   if (t.includes("BUY signal")) return "BUY";
   if (t.includes("SELL signal")) return "SELL";
@@ -278,6 +294,32 @@ function queueFSignal({ room, who, text, symbol }) {
   return { ok: true, queued: true, size: queueF.length };
 }
 
+// ★追加：G
+function queueGSignal({ room, who, text, symbol }) {
+  symbol = normalizeSymbol(symbol || "USDJPYmicro");
+  room = String(room || "");
+  who = String(who || "");
+  text = String(text || "");
+
+  const cmd = detectDirectionG(text);
+  if (!cmd) return { ok: true, ignored: "no_direction" };
+
+  const item = {
+    cmd,
+    symbol,
+    id: safeId("G"),
+    room,
+    who,
+    ts: Date.now()
+  };
+
+  const dkey = abMakeDedupKey({ channel: "G", who, room, cmd, symbol, text });
+  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
+
+  pushQueue(queueG, item);
+  return { ok: true, queued: true, size: queueG.length };
+}
+
 // ===== A：Plain =====
 app.post("/signal/a_plain", (req, res) => {
   if (!requireKey(req, res)) return;
@@ -342,6 +384,21 @@ app.post("/signal/f_plain", (req, res) => {
   if (!text) return res.status(400).json({ error: "missing body text" });
 
   const out = queueFSignal({ room, who, text, symbol });
+  return res.json(out);
+});
+
+// ★追加：G
+app.post("/signal/g_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "USDJPYmicro");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const out = queueGSignal({ room, who, text, symbol });
   return res.json(out);
 });
 
