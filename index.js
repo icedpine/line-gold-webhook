@@ -2,13 +2,14 @@ import express from "express";
 
 const app = express();
 
-// ★重要：全体に express.json() を掛けない（MacroDroidの壊れJSONで落ちないようにする）
-app.use(express.text({ type: "*/*", limit: "1mb" })); // 全リクエストを文字列で受ける
+app.use(express.text({ type: "*/*", limit: "1mb" }));
 
 const SECRET_KEY = process.env.SECRET_KEY;
 
 // ===== 共通設定 =====
 const MAX_QUEUE = 200;
+const SEEN_TTL_MS = 5 * 60 * 1000;
+const AB_DEDUP_MS = 2000;
 
 function requireKey(req, res) {
   const key = req.query.key;
@@ -27,11 +28,9 @@ function normalizeCmd(cmd) {
 function normalizeSymbol(symbol) {
   let s = String(symbol || "").trim().toUpperCase();
 
-  // GOLD
   if (s === "XAUUSD" || s === "XAUUSD#" || s === "XAU/USD" || s === "GOLD")
     return "GOLD";
 
-  // GOLDmicro
   if (
     s === "GOLDMICRO" ||
     s === "XAUUSDMICRO" ||
@@ -40,7 +39,6 @@ function normalizeSymbol(symbol) {
   )
     return "GOLDmicro";
 
-  // USDJPY
   if (s === "USDJPY" || s === "USD/JPY")
     return "USDJPY";
 
@@ -55,30 +53,6 @@ function pushQueue(queue, item) {
 function safeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
-
-// ===== Queue A/B/C/D/E/F =====
-const queueA = [];
-const seenA = new Map();
-
-const queueB = [];
-const seenB = new Map();
-
-const queueC = [];
-
-const queueD = [];
-const seenD = new Map();
-
-const queueE = [];
-const seenE = new Map();
-
-const queueF = [];
-const seenF = new Map();
-
-// ===== health =====
-app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
-
-// ===== A/B/D/E/F：汎用フォーマット受信 =====
-const SEEN_TTL_MS = 5 * 60 * 1000;
 
 function cleanupSeen(seenMap) {
   const now = Date.now();
@@ -116,34 +90,12 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-// A/B/D/E/F は JSON をルート単位で
-const jsonParser = express.json({ strict: true, limit: "1mb" });
-
-app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
-app.get("/last/a", (req, res) => handleLast(req, res, queueA));
-
-app.post("/signal/b", jsonParser, (req, res) => handleSignal(req, res, queueB, seenB));
-app.get("/last/b", (req, res) => handleLast(req, res, queueB));
-
-app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
-app.get("/last/d", (req, res) => handleLast(req, res, queueD));
-
-app.post("/signal/e", jsonParser, (req, res) => handleSignal(req, res, queueE, seenE));
-app.get("/last/e", (req, res) => handleLast(req, res, queueE));
-
-app.post("/signal/f", jsonParser, (req, res) => handleSignal(req, res, queueF, seenF));
-app.get("/last/f", (req, res) => handleLast(req, res, queueF));
-
-// =========================================================
-// ===== A/B：Plain運用（MacroDroid推奨）=====================
-// =========================================================
-const AB_DEDUP_MS = 2000;
-const abRecent = new Map();
-
 function abMakeDedupKey({ channel, who, room, cmd, symbol, text }) {
   const t = String(text || "").replace(/\s+/g, " ").trim().slice(0, 120);
   return `${channel}|${who}|${room}|${cmd}|${symbol}|${t}`;
 }
+
+const abRecent = new Map();
 
 function abIsDuplicateAndMark(key) {
   const now = Date.now();
@@ -158,19 +110,42 @@ function abIsDuplicateAndMark(key) {
   return false;
 }
 
-// A専用：文言でBUY/SELL判定
+// ===== Queue A/D/E/F =====
+const queueA = [];
+const seenA = new Map();
+
+const queueD = [];
+const seenD = new Map();
+
+const queueE = [];
+const seenE = new Map();
+
+const queueF = [];
+const seenF = new Map();
+
+// ===== health =====
+app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
+
+// ===== A/D/E/F：汎用フォーマット受信 =====
+const jsonParser = express.json({ strict: true, limit: "1mb" });
+
+app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
+app.get("/last/a", (req, res) => handleLast(req, res, queueA));
+
+app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
+app.get("/last/d", (req, res) => handleLast(req, res, queueD));
+
+app.post("/signal/e", jsonParser, (req, res) => handleSignal(req, res, queueE, seenE));
+app.get("/last/e", (req, res) => handleLast(req, res, queueE));
+
+app.post("/signal/f", jsonParser, (req, res) => handleSignal(req, res, queueF, seenF));
+app.get("/last/f", (req, res) => handleLast(req, res, queueF));
+
+// A専用
 function detectDirectionA(text) {
   const t = String(text || "");
   if (t.includes("USDJPYロングエントリー")) return "BUY";
   if (t.includes("USDJPYショートエントリー")) return "SELL";
-  return "";
-}
-
-// B専用
-function detectDirectionB(text) {
-  const t = String(text || "");
-  if (t.includes("ゴールドロング") && (t.includes("成行買い") || t.includes("買い"))) return "BUY";
-  if (t.includes("ゴールドショート") && (t.includes("成行売り") || t.includes("売り"))) return "SELL";
   return "";
 }
 
@@ -198,38 +173,31 @@ function detectDirectionF(text) {
   return "";
 }
 
-function queueABSignal({ channel, room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "GOLD");
+function queueASignal({ room, who, text, symbol }) {
+  symbol = normalizeSymbol(symbol || "USDJPY");
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
 
-  if (channel === "A") {
-    symbol = "USDJPY";
-  }
+  symbol = "USDJPY";
 
-  let cmd = "";
-  if (channel === "A") cmd = detectDirectionA(text);
-  if (channel === "B") cmd = detectDirectionB(text);
-
+  const cmd = detectDirectionA(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
   const item = {
     cmd,
     symbol,
-    id: safeId(channel),
+    id: safeId("A"),
     room,
     who,
     ts: Date.now()
   };
 
-  const dkey = abMakeDedupKey({ channel, who, room, cmd, symbol, text });
+  const dkey = abMakeDedupKey({ channel: "A", who, room, cmd, symbol, text });
   if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
 
-  if (channel === "A") pushQueue(queueA, item);
-  else pushQueue(queueB, item);
-
-  return { ok: true, queued: true, size: channel === "A" ? queueA.length : queueB.length };
+  pushQueue(queueA, item);
+  return { ok: true, queued: true, size: queueA.length };
 }
 
 function queueDSignal({ room, who, text, symbol }) {
@@ -331,83 +299,8 @@ app.post("/signal/a_plain", (req, res) => {
     return res.json({ ok: true, ignored: "who_mismatch", who });
   }
 
-  const out = queueABSignal({ channel: "A", room, who, text, symbol });
+  const out = queueASignal({ room, who, text, symbol });
   return res.json(out);
-});
-
-// =====================================================
-// B：2段階（既存維持）
-// =====================================================
-const B_STANDBY_TTL_MS = 10 * 60 * 1000;
-let bStandby = null;
-
-function detectStandbyB(text) {
-  const t = String(text || "");
-  if (t.includes("ゴールドロング") && t.includes("成行買い")) return "BUY";
-  if (t.includes("ゴールドショート") && t.includes("成行売り")) return "SELL";
-  return "";
-}
-
-function isStampTriggerB(text) {
-  const t = String(text || "").replace(/\s+/g, " ").trim();
-  return t.includes("スタンプを送信しました");
-}
-
-app.post("/signal/b_plain", (req, res) => {
-  if (!requireKey(req, res)) return;
-
-  const room = String(req.query.room || "");
-  const who = String(req.query.who || "");
-  const symbol = normalizeSymbol(String(req.query.symbol || "GOLD"));
-  const text = typeof req.body === "string" ? req.body : "";
-
-  if (!text) return res.status(400).json({ error: "missing body text" });
-
-  if (room && room !== "FX裁量EA配信【ゴールデン ランサーズ】コミュニティ") {
-    return res.json({ ok: true, ignored: "room_mismatch", room });
-  }
-  if (who && who !== "Ally") {
-    return res.json({ ok: true, ignored: "who_mismatch", who });
-  }
-
-  const standbyCmd = detectStandbyB(text);
-  if (standbyCmd) {
-    bStandby = { cmd: standbyCmd, symbol, room, who, ts: Date.now() };
-    return res.json({ ok: true, standby: true, cmd: standbyCmd });
-  }
-
-  if (isStampTriggerB(text)) {
-    if (!bStandby) return res.json({ ok: true, ignored: "no_standby" });
-
-    if (Date.now() - bStandby.ts > B_STANDBY_TTL_MS) {
-      bStandby = null;
-      return res.json({ ok: true, ignored: "standby_expired" });
-    }
-
-    const cmd = bStandby.cmd;
-    const sym = bStandby.symbol || "GOLD";
-
-    const dkey = abMakeDedupKey({
-      channel: "B",
-      who,
-      room,
-      cmd,
-      symbol: sym,
-      text
-    });
-    if (abIsDuplicateAndMark(dkey)) {
-      return res.json({ ok: true, deduped: true, reason: "short_window" });
-    }
-
-    const item = { cmd, symbol: sym, id: safeId("B"), ts: Date.now() };
-    pushQueue(queueB, item);
-
-    bStandby = null;
-
-    return res.json({ ok: true, queued: true, cmd, size: queueB.length });
-  }
-
-  return res.json({ ok: true, ignored: "no_match" });
 });
 
 // D：Discord（ぼっち）
@@ -454,122 +347,6 @@ app.post("/signal/f_plain", (req, res) => {
   const out = queueFSignal({ room, who, text, symbol });
   return res.json(out);
 });
-
-// =====================
-// C（元のまま維持）
-// =====================
-const DEBUG_C = true;
-function cLog(...args) { if (DEBUG_C) console.log(...args); }
-
-function extractNumber(text, patterns) {
-  for (const re of patterns) {
-    const m = String(text).match(re);
-    if (m && m[1]) return Number(m[1]);
-  }
-  return null;
-}
-
-function detectDirection(text) {
-  const t = String(text);
-  const u = t.toUpperCase();
-
-  const isLong  = t.includes("ロング") || u.includes("LONG") || u.includes("BUY")  || t.includes("買い");
-  const isShort = t.includes("ショート") || u.includes("SHORT") || u.includes("SELL") || t.includes("売り");
-
-  if (isLong && isShort) return "";
-  if (!isLong && !isShort) return "";
-  return isLong ? "BUY" : "SELL";
-}
-
-function parseEntrySlTpByWho(who, text) {
-  const t = String(text);
-  const arrow = "[:：⇒=>→]";
-
-  if (who === "ゆな") {
-    const entry = extractNumber(t, [new RegExp(`エントリー\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-    const sl    = extractNumber(t, [new RegExp(`損切\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-    const tp    = extractNumber(t, [new RegExp(`利確\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-    return { entry, sl, tp };
-  }
-
-  if (who === "しおり") {
-    const entry = extractNumber(t, [new RegExp(`\\bEN\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-    const sl    = extractNumber(t, [new RegExp(`\\bSL\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-    const tp    = extractNumber(t, [new RegExp(`\\bTP1\\s*${arrow}\\s*([0-9.]+)`, "i")]);
-    return { entry, sl, tp };
-  }
-
-  return { entry: null, sl: null, tp: null };
-}
-
-const C_DEDUP_MS = 2000;
-const cRecent = new Map();
-
-function makeDedupKey(item) {
-  return `${item.who}|${item.cmd}|${item.symbol}|${item.entry}|${item.sl}|${item.tp ?? ""}`;
-}
-
-function isDuplicateAndMark(key) {
-  const now = Date.now();
-  const prev = cRecent.get(key) || 0;
-
-  for (const [k, ts] of cRecent.entries()) {
-    if (now - ts > C_DEDUP_MS * 5) cRecent.delete(k);
-  }
-
-  if (now - prev < C_DEDUP_MS) return true;
-  cRecent.set(key, now);
-  return false;
-}
-
-function queueCSignal({ room, who, text, symbol, id }) {
-  symbol = normalizeSymbol(symbol || "GOLD");
-  if (!id) id = "C-" + Date.now() + "-" + Math.random();
-
-  const cmd = detectDirection(text);
-  if (!cmd) return { ok: true, ignored: "no_direction" };
-
-  if (who !== "ゆな" && who !== "しおり") {
-    return { ok: true, ignored: "who_not_allowed" };
-  }
-
-  const { entry, sl, tp } = parseEntrySlTpByWho(who, text);
-  if (!entry || !sl || !tp) return { ok: false, error: "parse_failed" };
-
-  const item = { cmd, symbol, id, entry, sl, tp, n: 3, who, room, ts: Date.now() };
-
-  const dkey = makeDedupKey(item);
-  if (isDuplicateAndMark(dkey)) {
-    cLog("[C] dedup_short", dkey);
-    return { ok: true, deduped: true };
-  }
-
-  pushQueue(queueC, item);
-  cLog("[C] queued", item);
-  return { ok: true, queued: true };
-}
-
-app.post("/signal/c", jsonParser, (req, res) => {
-  if (!requireKey(req, res)) return;
-  const out = queueCSignal(req.body);
-  return res.json(out);
-});
-
-app.post("/signal/c_plain", (req, res) => {
-  if (!requireKey(req, res)) return;
-
-  const out = queueCSignal({
-    who: req.query.who,
-    room: req.query.room,
-    symbol: req.query.symbol,
-    id: req.query.id,
-    text: typeof req.body === "string" ? req.body : ""
-  });
-
-  return res.json(out);
-});
-
-app.get("/last/c", (req, res) => handleLast(req, res, queueC));
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Server running on port", port));
