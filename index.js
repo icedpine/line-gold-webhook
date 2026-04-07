@@ -26,21 +26,26 @@ function normalizeCmd(cmd) {
 }
 
 function normalizeSymbol(symbol) {
-  let s = String(symbol || "").trim().toUpperCase();
+  let s = String(symbol || "").trim();
 
-  if (s === "XAUUSD" || s === "XAUUSD#" || s === "XAU/USD" || s === "GOLD")
-    return "GOLD";
+  const u = s.toUpperCase();
 
-  if (
-    s === "GOLDMICRO" ||
-    s === "XAUUSDMICRO" ||
-    s === "XAU/USDMICRO" ||
-    s === "GOLDMICROM"
-  )
-    return "GOLDmicro";
+  if (u === "GOLD") return "GOLD";
+  if (u === "GOLDMICRO") return "GOLDmicro";
+  if (u === "XAUUSD") return "XAUUSD";
+  if (u === "XAUUSDS") return "XAUUSDs";
+  if (u === "XAUUSDMICRO") return "XAUUSDmicro";
+  if (u === "USDJPY") return "USDJPY";
+  if (u === "USDJPYMICRO") return "USDJPYmicro";
+  if (u === "USDJPYS") return "USDJPYs";
+  if (u === "EURUSD") return "EURUSD";
+  if (u === "EURUSDMICRO") return "EURUSDmicro";
+  if (u === "EURUSDS") return "EURUSDs";
 
-  if (s === "USDJPY" || s === "USD/JPY")
-    return "USDJPY";
+  // 旧互換
+  if (u === "XAU/USD" || u === "XAUUSD#") return "XAUUSD";
+  if (u === "USD/JPY") return "USDJPY";
+  if (u === "EUR/USD") return "EURUSD";
 
   return s;
 }
@@ -179,8 +184,6 @@ function queueASignal({ room, who, text, symbol }) {
   who = String(who || "");
   text = String(text || "");
 
-  symbol = "USDJPY";
-
   const cmd = detectDirectionA(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
@@ -205,8 +208,6 @@ function queueDSignal({ room, who, text, symbol }) {
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
-
-  symbol = "GOLDmicro";
 
   const cmd = detectDirectionD(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
@@ -233,8 +234,6 @@ function queueESignal({ room, who, text, symbol }) {
   who = String(who || "");
   text = String(text || "");
 
-  symbol = "GOLDmicro";
-
   const cmd = detectDirectionE(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
@@ -259,8 +258,6 @@ function queueFSignal({ room, who, text, symbol }) {
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
-
-  symbol = "GOLDmicro";
 
   const cmd = detectDirectionF(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
@@ -303,7 +300,7 @@ app.post("/signal/a_plain", (req, res) => {
   return res.json(out);
 });
 
-// D：Discord（ぼっち）
+// D
 app.post("/signal/d_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -318,7 +315,7 @@ app.post("/signal/d_plain", (req, res) => {
   return res.json(out);
 });
 
-// E：Discord（Ayanobil）
+// E
 app.post("/signal/e_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -333,7 +330,7 @@ app.post("/signal/e_plain", (req, res) => {
   return res.json(out);
 });
 
-// F：Discord（Shabasu）
+// F
 app.post("/signal/f_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
