@@ -31,6 +31,15 @@ function normalizeSymbol(symbol) {
   if (s === "XAUUSD" || s === "XAUUSD#" || s === "XAU/USD" || s === "GOLD")
     return "GOLD";
 
+  // GOLDmicro
+  if (
+    s === "GOLDMICRO" ||
+    s === "XAUUSDMICRO" ||
+    s === "XAU/USDMICRO" ||
+    s === "GOLDMICROM"
+  )
+    return "GOLDmicro";
+
   // USDJPY
   if (s === "USDJPY" || s === "USD/JPY")
     return "USDJPY";
@@ -47,7 +56,7 @@ function safeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
 
-// ===== Queue A/B/C/D/E =====
+// ===== Queue A/B/C/D/E/F =====
 const queueA = [];
 const seenA = new Map();
 
@@ -59,18 +68,16 @@ const queueC = [];
 const queueD = [];
 const seenD = new Map();
 
-// ★追加：E(Ayanobil)
 const queueE = [];
 const seenE = new Map();
 
-// ★追加：F(Shabasu)
 const queueF = [];
 const seenF = new Map();
 
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/B/D/E：汎用フォーマット受信（既存互換で残す） =====
+// ===== A/B/D/E/F：汎用フォーマット受信 =====
 const SEEN_TTL_MS = 5 * 60 * 1000;
 
 function cleanupSeen(seenMap) {
@@ -109,7 +116,7 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-// A/B/D/E は JSON をルート単位で（curl/手動送信用）
+// A/B/D/E/F は JSON をルート単位で
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
 app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
@@ -121,19 +128,15 @@ app.get("/last/b", (req, res) => handleLast(req, res, queueB));
 app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
 app.get("/last/d", (req, res) => handleLast(req, res, queueD));
 
-// ★追加：E(Ayanobil)
 app.post("/signal/e", jsonParser, (req, res) => handleSignal(req, res, queueE, seenE));
 app.get("/last/e", (req, res) => handleLast(req, res, queueE));
 
-// ★追加：F(Shabasu)
 app.post("/signal/f", jsonParser, (req, res) => handleSignal(req, res, queueF, seenF));
 app.get("/last/f", (req, res) => handleLast(req, res, queueF));
 
 // =========================================================
-// ===== A/B：Cと同じ “Plain運用” を追加（MacroDroid推奨）=====
+// ===== A/B：Plain運用（MacroDroid推奨）=====================
 // =========================================================
-
-// ★短期デデュープ（同一通知の二重POSTだけ潰す）
 const AB_DEDUP_MS = 2000;
 const abRecent = new Map();
 
@@ -163,7 +166,7 @@ function detectDirectionA(text) {
   return "";
 }
 
-// B専用：文言でBUY/SELL判定（※これは /signal/b_plain では使わない。旧ロジック互換用に残す）
+// B専用
 function detectDirectionB(text) {
   const t = String(text || "");
   if (t.includes("ゴールドロング") && (t.includes("成行買い") || t.includes("買い"))) return "BUY";
@@ -179,7 +182,7 @@ function detectDirectionD(text) {
   return "";
 }
 
-// ★追加：E専用
+// E専用
 function detectDirectionE(text) {
   const t = String(text || "");
   if (t.includes("BUY signal")) return "BUY";
@@ -187,14 +190,13 @@ function detectDirectionE(text) {
   return "";
 }
 
-// ★追加：F専用
+// F専用
 function detectDirectionF(text) {
   const t = String(text || "");
   if (t.includes("BUY signal")) return "BUY";
   if (t.includes("SELL signal")) return "SELL";
   return "";
 }
-
 
 function queueABSignal({ channel, room, who, text, symbol }) {
   symbol = normalizeSymbol(symbol || "GOLD");
@@ -236,7 +238,6 @@ function queueDSignal({ room, who, text, symbol }) {
   who = String(who || "");
   text = String(text || "");
 
-  // DはGOLDmicro固定
   symbol = "GOLDmicro";
 
   const cmd = detectDirectionD(text);
@@ -258,14 +259,12 @@ function queueDSignal({ room, who, text, symbol }) {
   return { ok: true, queued: true, size: queueD.length };
 }
 
-// ★追加：E専用
 function queueESignal({ room, who, text, symbol }) {
   symbol = normalizeSymbol(symbol || "GOLDmicro");
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
 
-  // EはGOLD固定
   symbol = "GOLDmicro";
 
   const cmd = detectDirectionE(text);
@@ -287,17 +286,15 @@ function queueESignal({ room, who, text, symbol }) {
   return { ok: true, queued: true, size: queueE.length };
 }
 
-// ★追加：F専用
 function queueFSignal({ room, who, text, symbol }) {
   symbol = normalizeSymbol(symbol || "GOLDmicro");
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
 
-  // FはGOLDmicro固定
   symbol = "GOLDmicro";
 
-  const cmd = detectDirectionE(text);
+  const cmd = detectDirectionF(text);
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
   const item = {
@@ -316,8 +313,7 @@ function queueFSignal({ room, who, text, symbol }) {
   return { ok: true, queued: true, size: queueF.length };
 }
 
-
-// ===== A：Plain（MacroDroid）=====
+// ===== A：Plain =====
 app.post("/signal/a_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -339,11 +335,9 @@ app.post("/signal/a_plain", (req, res) => {
   return res.json(out);
 });
 
-
 // =====================================================
-// ★B：2段階（方向→スタンプで発注）ここだけ新実装
+// B：2段階（既存維持）
 // =====================================================
-
 const B_STANDBY_TTL_MS = 10 * 60 * 1000;
 let bStandby = null;
 
@@ -416,11 +410,7 @@ app.post("/signal/b_plain", (req, res) => {
   return res.json({ ok: true, ignored: "no_match" });
 });
 
-
-// =====================================================
-// ★D：Discord（ぼっちグループ）
-// =====================================================
-
+// D：Discord（ぼっち）
 app.post("/signal/d_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -435,11 +425,7 @@ app.post("/signal/d_plain", (req, res) => {
   return res.json(out);
 });
 
-
-// =====================================================
-// ★E：Discord（XAUUSD Ayanobil signal）
-// =====================================================
-
+// E：Discord（Ayanobil）
 app.post("/signal/e_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -454,10 +440,7 @@ app.post("/signal/e_plain", (req, res) => {
   return res.json(out);
 });
 
-// =====================================================
-// ★F：Discord（XAUUSD Shabasu signal）
-// =====================================================
-
+// F：Discord（Shabasu）
 app.post("/signal/f_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
@@ -472,9 +455,8 @@ app.post("/signal/f_plain", (req, res) => {
   return res.json(out);
 });
 
-
 // =====================
-// ===== C（ここは維持）=====
+// C（元のまま維持）
 // =====================
 const DEBUG_C = true;
 function cLog(...args) { if (DEBUG_C) console.log(...args); }
