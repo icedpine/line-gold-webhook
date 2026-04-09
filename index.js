@@ -10,6 +10,7 @@ const SECRET_KEY = process.env.SECRET_KEY;
 const MAX_QUEUE = 200;
 const SEEN_TTL_MS = 5 * 60 * 1000;
 const AB_DEDUP_MS = 2000;
+const FAMILY_COPIES = 10;
 
 function requireKey(req, res) {
   const key = req.query.key;
@@ -80,6 +81,12 @@ function pushQueue(queue, item) {
   while (queue.length > MAX_QUEUE) queue.shift();
 }
 
+function pushFamilyQueues(queues, item) {
+  for (let i = 0; i < queues.length; i++) {
+    pushQueue(queues[i], { ...item });
+  }
+}
+
 function safeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
@@ -91,7 +98,7 @@ function cleanupSeen(seenMap) {
   }
 }
 
-function handleSignal(req, res, queue, seen) {
+function handleSignalFamily(req, res, queues, seen) {
   if (!requireKey(req, res)) return;
 
   let { cmd, symbol, id } = req.body;
@@ -110,8 +117,10 @@ function handleSignal(req, res, queue, seen) {
   if (seen.has(id)) return res.json({ ok: true, deduped: true });
   seen.set(id, Date.now());
 
-  pushQueue(queue, { cmd, symbol, id, ts: Date.now() });
-  return res.json({ ok: true, queued: true });
+  const item = { cmd, symbol, id, ts: Date.now() };
+  pushFamilyQueues(queues, item);
+
+  return res.json({ ok: true, queued: true, copies: queues.length });
 }
 
 function handleLast(req, res, queue) {
@@ -140,62 +149,82 @@ function abIsDuplicateAndMark(key) {
   return false;
 }
 
-// ===== Queue A/D/E/F/G =====
-const queueA = [];
+// ===== Queue families =====
+// a = Bocchi
+// b = Ayanobil
+// c = Shabasu
+// d = Yozakura
+// e = 追加したG系
+const queuesA = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenA = new Map();
 
-const queueD = [];
+const queuesB = Array.from({ length: FAMILY_COPIES }, () => []);
+const seenB = new Map();
+
+const queuesC = Array.from({ length: FAMILY_COPIES }, () => []);
+const seenC = new Map();
+
+const queuesD = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenD = new Map();
 
-const queueE = [];
+const queuesE = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenE = new Map();
-
-const queueF = [];
-const seenF = new Map();
-
-// ★追加：G
-const queueG = [];
-const seenG = new Map();
 
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
-// ===== A/D/E/F/G：汎用フォーマット受信 =====
+// ===== JSON routes =====
 const jsonParser = express.json({ strict: true, limit: "1mb" });
 
-app.post("/signal/a", jsonParser, (req, res) => handleSignal(req, res, queueA, seenA));
-app.get("/last/a", (req, res) => handleLast(req, res, queueA));
+app.post("/signal/a", jsonParser, (req, res) => handleSignalFamily(req, res, queuesA, seenA));
+app.post("/signal/b", jsonParser, (req, res) => handleSignalFamily(req, res, queuesB, seenB));
+app.post("/signal/c", jsonParser, (req, res) => handleSignalFamily(req, res, queuesC, seenC));
+app.post("/signal/d", jsonParser, (req, res) => handleSignalFamily(req, res, queuesD, seenD));
+app.post("/signal/e", jsonParser, (req, res) => handleSignalFamily(req, res, queuesE, seenE));
 
-app.post("/signal/d", jsonParser, (req, res) => handleSignal(req, res, queueD, seenD));
-app.get("/last/d", (req, res) => handleLast(req, res, queueD));
-
-app.post("/signal/e", jsonParser, (req, res) => handleSignal(req, res, queueE, seenE));
-app.get("/last/e", (req, res) => handleLast(req, res, queueE));
-
-app.post("/signal/f", jsonParser, (req, res) => handleSignal(req, res, queueF, seenF));
-app.get("/last/f", (req, res) => handleLast(req, res, queueF));
-
-// ★追加：G
-app.post("/signal/g", jsonParser, (req, res) => handleSignal(req, res, queueG, seenG));
-app.get("/last/g", (req, res) => handleLast(req, res, queueG));
-
-// A専用
-function detectDirectionA(text) {
-  const t = String(text || "");
-  if (t.includes("USDJPYロングエントリー")) return "BUY";
-  if (t.includes("USDJPYショートエントリー")) return "SELL";
-  return "";
+for (let i = 1; i <= FAMILY_COPIES; i++) {
+  app.get(`/last/a${i}`, (req, res) => handleLast(req, res, queuesA[i - 1]));
+  app.get(`/last/b${i}`, (req, res) => handleLast(req, res, queuesB[i - 1]));
+  app.get(`/last/c${i}`, (req, res) => handleLast(req, res, queuesC[i - 1]));
+  app.get(`/last/d${i}`, (req, res) => handleLast(req, res, queuesD[i - 1]));
+  app.get(`/last/e${i}`, (req, res) => handleLast(req, res, queuesE[i - 1]));
 }
 
-// D専用
-function detectDirectionD(text) {
+// ===== 判定関数 =====
+
+// a = Bocchi
+function detectDirectionA(text) {
   const t = String(text || "");
   if (t.includes("スタンバイサイン") && t.includes("BUY")) return "BUY";
   if (t.includes("スタンバイサイン") && t.includes("SELL")) return "SELL";
   return "";
 }
 
-// E専用
+// b = Ayanobil
+function detectDirectionB(text) {
+  const t = String(text || "");
+  if (t.includes("BUY signal")) return "BUY";
+  if (t.includes("SELL signal")) return "SELL";
+  return "";
+}
+
+// c = Shabasu
+function detectDirectionC(text) {
+  const t = String(text || "");
+  if (t.includes("BUY signal")) return "BUY";
+  if (t.includes("SELL signal")) return "SELL";
+  return "";
+}
+
+// d = Yozakura
+function detectDirectionD(text) {
+  const t = String(text || "");
+  if (t.includes("USDJPYロングエントリー")) return "BUY";
+  if (t.includes("USDJPYショートエントリー")) return "SELL";
+  return "";
+}
+
+// e = 追加したG系
 function detectDirectionE(text) {
   const t = String(text || "");
   if (t.includes("BUY signal")) return "BUY";
@@ -203,150 +232,108 @@ function detectDirectionE(text) {
   return "";
 }
 
-// F専用
-function detectDirectionF(text) {
-  const t = String(text || "");
-  if (t.includes("BUY signal")) return "BUY";
-  if (t.includes("SELL signal")) return "SELL";
-  return "";
-}
-
-// ★追加：G専用
-function detectDirectionG(text) {
-  const t = String(text || "");
-  if (t.includes("BUY signal")) return "BUY";
-  if (t.includes("SELL signal")) return "SELL";
-  return "";
-}
-
-function queueASignal({ room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "USDJPY");
+function queueFamilySignal({ channel, queues, room, who, text, symbol, cmd }) {
+  symbol = normalizeSymbol(symbol);
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
+
+  if (!cmd) return { ok: true, ignored: "no_direction" };
+
+  const item = {
+    cmd,
+    symbol,
+    id: safeId(channel.toUpperCase()),
+    room,
+    who,
+    ts: Date.now()
+  };
+
+  const dkey = abMakeDedupKey({ channel, who, room, cmd, symbol, text });
+  if (abIsDuplicateAndMark(dkey)) {
+    return { ok: true, deduped: true, reason: "short_window" };
+  }
+
+  pushFamilyQueues(queues, item);
+  return { ok: true, queued: true, copies: queues.length };
+}
+
+// ===== Plain routes =====
+
+// a = Bocchi
+app.post("/signal/a_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLDmicro");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
 
   const cmd = detectDirectionA(text);
-  if (!cmd) return { ok: true, ignored: "no_direction" };
-
-  const item = {
-    cmd,
-    symbol,
-    id: safeId("A"),
+  const out = queueFamilySignal({
+    channel: "a",
+    queues: queuesA,
     room,
     who,
-    ts: Date.now()
-  };
-
-  const dkey = abMakeDedupKey({ channel: "A", who, room, cmd, symbol, text });
-  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
-
-  pushQueue(queueA, item);
-  return { ok: true, queued: true, size: queueA.length };
-}
-
-function queueDSignal({ room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "GOLDmicro");
-  room = String(room || "");
-  who = String(who || "");
-  text = String(text || "");
-
-  const cmd = detectDirectionD(text);
-  if (!cmd) return { ok: true, ignored: "no_direction" };
-
-  const item = {
-    cmd,
+    text,
     symbol,
-    id: safeId("D"),
+    cmd
+  });
+  return res.json(out);
+});
+
+// b = Ayanobil
+app.post("/signal/b_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLDmicro");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const cmd = detectDirectionB(text);
+  const out = queueFamilySignal({
+    channel: "b",
+    queues: queuesB,
     room,
     who,
-    ts: Date.now()
-  };
-
-  const dkey = abMakeDedupKey({ channel: "D", who, room, cmd, symbol, text });
-  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
-
-  pushQueue(queueD, item);
-  return { ok: true, queued: true, size: queueD.length };
-}
-
-function queueESignal({ room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "GOLDmicro");
-  room = String(room || "");
-  who = String(who || "");
-  text = String(text || "");
-
-  const cmd = detectDirectionE(text);
-  if (!cmd) return { ok: true, ignored: "no_direction" };
-
-  const item = {
-    cmd,
+    text,
     symbol,
-    id: safeId("E"),
+    cmd
+  });
+  return res.json(out);
+});
+
+// c = Shabasu
+app.post("/signal/c_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const symbol = String(req.query.symbol || "GOLDmicro");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const cmd = detectDirectionC(text);
+  const out = queueFamilySignal({
+    channel: "c",
+    queues: queuesC,
     room,
     who,
-    ts: Date.now()
-  };
-
-  const dkey = abMakeDedupKey({ channel: "E", who, room, cmd, symbol, text });
-  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
-
-  pushQueue(queueE, item);
-  return { ok: true, queued: true, size: queueE.length };
-}
-
-function queueFSignal({ room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "GOLDmicro");
-  room = String(room || "");
-  who = String(who || "");
-  text = String(text || "");
-
-  const cmd = detectDirectionF(text);
-  if (!cmd) return { ok: true, ignored: "no_direction" };
-
-  const item = {
-    cmd,
+    text,
     symbol,
-    id: safeId("F"),
-    room,
-    who,
-    ts: Date.now()
-  };
+    cmd
+  });
+  return res.json(out);
+});
 
-  const dkey = abMakeDedupKey({ channel: "F", who, room, cmd, symbol, text });
-  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
-
-  pushQueue(queueF, item);
-  return { ok: true, queued: true, size: queueF.length };
-}
-
-// ★追加：G
-function queueGSignal({ room, who, text, symbol }) {
-  symbol = normalizeSymbol(symbol || "USDJPYmicro");
-  room = String(room || "");
-  who = String(who || "");
-  text = String(text || "");
-
-  const cmd = detectDirectionG(text);
-  if (!cmd) return { ok: true, ignored: "no_direction" };
-
-  const item = {
-    cmd,
-    symbol,
-    id: safeId("G"),
-    room,
-    who,
-    ts: Date.now()
-  };
-
-  const dkey = abMakeDedupKey({ channel: "G", who, room, cmd, symbol, text });
-  if (abIsDuplicateAndMark(dkey)) return { ok: true, deduped: true, reason: "short_window" };
-
-  pushQueue(queueG, item);
-  return { ok: true, queued: true, size: queueG.length };
-}
-
-// ===== A：Plain =====
-app.post("/signal/a_plain", (req, res) => {
+// d = Yozakura
+app.post("/signal/d_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
   const room = String(req.query.room || "");
@@ -363,57 +350,21 @@ app.post("/signal/a_plain", (req, res) => {
     return res.json({ ok: true, ignored: "who_mismatch", who });
   }
 
-  const out = queueASignal({ room, who, text, symbol });
+  const cmd = detectDirectionD(text);
+  const out = queueFamilySignal({
+    channel: "d",
+    queues: queuesD,
+    room,
+    who,
+    text,
+    symbol,
+    cmd
+  });
   return res.json(out);
 });
 
-// D
-app.post("/signal/d_plain", (req, res) => {
-  if (!requireKey(req, res)) return;
-
-  const room = String(req.query.room || "");
-  const who = String(req.query.who || "");
-  const symbol = String(req.query.symbol || "GOLDmicro");
-  const text = typeof req.body === "string" ? req.body : "";
-
-  if (!text) return res.status(400).json({ error: "missing body text" });
-
-  const out = queueDSignal({ room, who, text, symbol });
-  return res.json(out);
-});
-
-// E
+// e = 追加したG系
 app.post("/signal/e_plain", (req, res) => {
-  if (!requireKey(req, res)) return;
-
-  const room = String(req.query.room || "");
-  const who = String(req.query.who || "");
-  const symbol = String(req.query.symbol || "GOLDmicro");
-  const text = typeof req.body === "string" ? req.body : "";
-
-  if (!text) return res.status(400).json({ error: "missing body text" });
-
-  const out = queueESignal({ room, who, text, symbol });
-  return res.json(out);
-});
-
-// F
-app.post("/signal/f_plain", (req, res) => {
-  if (!requireKey(req, res)) return;
-
-  const room = String(req.query.room || "");
-  const who = String(req.query.who || "");
-  const symbol = String(req.query.symbol || "GOLDmicro");
-  const text = typeof req.body === "string" ? req.body : "";
-
-  if (!text) return res.status(400).json({ error: "missing body text" });
-
-  const out = queueFSignal({ room, who, text, symbol });
-  return res.json(out);
-});
-
-// ★追加：G
-app.post("/signal/g_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
   const room = String(req.query.room || "");
@@ -423,7 +374,16 @@ app.post("/signal/g_plain", (req, res) => {
 
   if (!text) return res.status(400).json({ error: "missing body text" });
 
-  const out = queueGSignal({ room, who, text, symbol });
+  const cmd = detectDirectionE(text);
+  const out = queueFamilySignal({
+    channel: "e",
+    queues: queuesE,
+    room,
+    who,
+    text,
+    symbol,
+    cmd
+  });
   return res.json(out);
 });
 
