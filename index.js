@@ -154,7 +154,7 @@ function abIsDuplicateAndMark(key) {
 // b = Ayanobil
 // c = Shabasu
 // d = Yozakura
-// e = 追加したG系
+// e = Anyanical
 const queuesA = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenA = new Map();
 
@@ -224,7 +224,7 @@ function detectDirectionD(text) {
   return "";
 }
 
-// e = 追加したG系
+// e = Anyanical
 function detectDirectionE(text) {
   const t = String(text || "");
   if (t.includes("BUY signal")) return "BUY";
@@ -363,7 +363,7 @@ app.post("/signal/d_plain", (req, res) => {
   return res.json(out);
 });
 
-// e = 追加したG系
+// e = Anyanical
 app.post("/signal/e_plain", (req, res) => {
   if (!requireKey(req, res)) return;
 
