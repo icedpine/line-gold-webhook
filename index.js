@@ -27,25 +27,50 @@ function normalizeCmd(cmd) {
 
 function normalizeSymbol(symbol) {
   let s = String(symbol || "").trim();
-
   const u = s.toUpperCase();
 
+  // GOLD group
   if (u === "GOLD") return "GOLD";
   if (u === "GOLDMICRO") return "GOLDmicro";
+  if (u === "GOLDS") return "GOLDs";
+  if (u === "GOLDC") return "GOLDc";
+
+  // XAUUSD group
   if (u === "XAUUSD") return "XAUUSD";
-  if (u === "XAUUSDS") return "XAUUSDs";
   if (u === "XAUUSDMICRO") return "XAUUSDmicro";
+  if (u === "XAUUSDS") return "XAUUSDs";
+  if (u === "XAUUSDC") return "XAUUSDc";
+
+  // USDJPY group
   if (u === "USDJPY") return "USDJPY";
   if (u === "USDJPYMICRO") return "USDJPYmicro";
   if (u === "USDJPYS") return "USDJPYs";
+  if (u === "USDJPYC") return "USDJPYc";
+
+  // EURUSD group
   if (u === "EURUSD") return "EURUSD";
   if (u === "EURUSDMICRO") return "EURUSDmicro";
   if (u === "EURUSDS") return "EURUSDs";
+  if (u === "EURUSDC") return "EURUSDc";
+
+  // AUDUSD group
+  if (u === "AUDUSD") return "AUDUSD";
+  if (u === "AUDUSDMICRO") return "AUDUSDmicro";
+  if (u === "AUDUSDS") return "AUDUSDs";
+  if (u === "AUDUSDC") return "AUDUSDc";
+
+  // GBPUSD group
+  if (u === "GBPUSD") return "GBPUSD";
+  if (u === "GBPUSDMICRO") return "GBPUSDmicro";
+  if (u === "GBPUSDS") return "GBPUSDs";
+  if (u === "GBPUSDC") return "GBPUSDc";
 
   // 旧互換
   if (u === "XAU/USD" || u === "XAUUSD#") return "XAUUSD";
   if (u === "USD/JPY") return "USDJPY";
   if (u === "EUR/USD") return "EURUSD";
+  if (u === "AUD/USD") return "AUDUSD";
+  if (u === "GBP/USD") return "GBPUSD";
 
   return s;
 }
