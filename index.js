@@ -276,6 +276,27 @@ function detectSymbolF(text) {
   return normalizeSymbol(m[1]);
 }
 
+// f_flex 用（最小追加）
+function detectDirectionFFlex(raw) {
+  const t = String(raw || "");
+  const m = t.match(/\b(buy|sell)\b\s*@/i);
+  return m ? String(m[1]).toUpperCase() : "";
+}
+
+function extractPriceTagFFlex(raw) {
+  const t = String(raw || "");
+  const m = t.match(/@\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (!m) return "";
+  return normalizePriceTag2(m[1]);
+}
+
+function detectSymbolFFlex(raw, fallback) {
+  const t = String(raw || "");
+  const m = t.match(/:\s*([A-Za-z0-9\/#]+)\s*で\s*(?:buy|sell)\b/i);
+  if (!m) return normalizeSymbol(fallback || "");
+  return normalizeSymbol(m[1]);
+}
+
 function queueFamilySignal({ channel, queues, room, who, text, symbol, cmd, priceTag }) {
   symbol = normalizeSymbol(symbol);
   room = String(room || "");
@@ -463,6 +484,57 @@ app.post("/signal/f_plain", (req, res) => {
     priceTag
   });
   return res.json(out);
+});
+
+// f_flex = Macrodroid 用（最小追加）
+app.post("/signal/f_flex", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const title = String(req.query.title || "");
+  const text = String(req.query.text || "");
+  const big = String(req.query.big || "");
+  const body = typeof req.body === "string" ? req.body : "";
+  const symbolFromQuery = String(req.query.symbol || "USDJPYmicro");
+
+  const raw = [title, text, big, body].filter(Boolean).join("\n");
+
+  if (!raw) {
+    return res.status(400).json({ error: "missing raw text" });
+  }
+
+  const cmd = detectDirectionFFlex(raw);
+  const priceTag = extractPriceTagFFlex(raw);
+  const symbol = detectSymbolFFlex(raw, symbolFromQuery) || normalizeSymbol(symbolFromQuery);
+
+  if (!cmd) {
+    return res.json({ ok: true, ignored: "no_direction" });
+  }
+
+  if (!priceTag) {
+    return res.json({ ok: true, ignored: "no_price_tag" });
+  }
+
+  const out = queueFamilySignal({
+    channel: "f",
+    queues: queuesF,
+    room,
+    who,
+    text: raw,
+    symbol,
+    cmd,
+    priceTag
+  });
+
+  return res.json({
+    ...out,
+    parsed: {
+      cmd,
+      symbol,
+      priceTag
+    }
+  });
 });
 
 const port = process.env.PORT || 3000;
