@@ -76,6 +76,12 @@ function normalizeSymbol(symbol) {
   return s;
 }
 
+function normalizePriceTag2(priceTag) {
+  const n = Number(priceTag);
+  if (!Number.isFinite(n)) return "";
+  return n.toFixed(2);
+}
+
 function pushQueue(queue, item) {
   queue.push(item);
   while (queue.length > MAX_QUEUE) queue.shift();
@@ -101,7 +107,16 @@ function cleanupSeen(seenMap) {
 function handleSignalFamily(req, res, queues, seen) {
   if (!requireKey(req, res)) return;
 
-  let { cmd, symbol, id } = req.body;
+  let body = req.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch (e) {
+      body = {};
+    }
+  }
+
+  let { cmd, symbol, id, priceTag } = body || {};
   if (!cmd || !symbol || !id) {
     return res.status(400).json({ error: "missing fields" });
   }
@@ -109,6 +124,7 @@ function handleSignalFamily(req, res, queues, seen) {
   cmd = normalizeCmd(cmd);
   symbol = normalizeSymbol(symbol);
   id = String(id);
+  priceTag = priceTag == null ? "" : normalizePriceTag2(priceTag);
 
   if (!cmd) return res.status(400).json({ error: "invalid cmd" });
   if (!symbol) return res.status(400).json({ error: "invalid symbol" });
@@ -117,10 +133,10 @@ function handleSignalFamily(req, res, queues, seen) {
   if (seen.has(id)) return res.json({ ok: true, deduped: true });
   seen.set(id, Date.now());
 
-  const item = { cmd, symbol, id, ts: Date.now() };
+  const item = { cmd, symbol, id, priceTag, ts: Date.now() };
   pushFamilyQueues(queues, item);
 
-  return res.json({ ok: true, queued: true, copies: queues.length });
+  return res.json({ ok: true, queued: true, copies: queues.length, priceTag });
 }
 
 function handleLast(req, res, queue) {
@@ -129,9 +145,10 @@ function handleLast(req, res, queue) {
   return res.json(queue.shift());
 }
 
-function abMakeDedupKey({ channel, who, room, cmd, symbol, text }) {
+function abMakeDedupKey({ channel, who, room, cmd, symbol, text, priceTag }) {
   const t = String(text || "").replace(/\s+/g, " ").trim().slice(0, 120);
-  return `${channel}|${who}|${room}|${cmd}|${symbol}|${t}`;
+  const p = String(priceTag || "");
+  return `${channel}|${who}|${room}|${cmd}|${symbol}|${p}|${t}`;
 }
 
 const abRecent = new Map();
@@ -155,6 +172,7 @@ function abIsDuplicateAndMark(key) {
 // c = Shabasu
 // d = Yozakura
 // e = Anyanical
+// f = TradingView REM BB Pullback Rider V3
 const queuesA = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenA = new Map();
 
@@ -170,6 +188,9 @@ const seenD = new Map();
 const queuesE = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenE = new Map();
 
+const queuesF = Array.from({ length: FAMILY_COPIES }, () => []);
+const seenF = new Map();
+
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
@@ -181,6 +202,7 @@ app.post("/signal/b", jsonParser, (req, res) => handleSignalFamily(req, res, que
 app.post("/signal/c", jsonParser, (req, res) => handleSignalFamily(req, res, queuesC, seenC));
 app.post("/signal/d", jsonParser, (req, res) => handleSignalFamily(req, res, queuesD, seenD));
 app.post("/signal/e", jsonParser, (req, res) => handleSignalFamily(req, res, queuesE, seenE));
+app.post("/signal/f", jsonParser, (req, res) => handleSignalFamily(req, res, queuesF, seenF));
 
 for (let i = 1; i <= FAMILY_COPIES; i++) {
   app.get(`/last/a${i}`, (req, res) => handleLast(req, res, queuesA[i - 1]));
@@ -188,6 +210,7 @@ for (let i = 1; i <= FAMILY_COPIES; i++) {
   app.get(`/last/c${i}`, (req, res) => handleLast(req, res, queuesC[i - 1]));
   app.get(`/last/d${i}`, (req, res) => handleLast(req, res, queuesD[i - 1]));
   app.get(`/last/e${i}`, (req, res) => handleLast(req, res, queuesE[i - 1]));
+  app.get(`/last/f${i}`, (req, res) => handleLast(req, res, queuesF[i - 1]));
 }
 
 // ===== 判定関数 =====
@@ -232,11 +255,33 @@ function detectDirectionE(text) {
   return "";
 }
 
-function queueFamilySignal({ channel, queues, room, who, text, symbol, cmd }) {
+// f = TradingView REM BB Pullback Rider V3
+function detectDirectionF(text) {
+  const t = String(text || "");
+  const m = t.match(/\b(buy|sell)\b\s*@/i);
+  return m ? String(m[1]).toUpperCase() : "";
+}
+
+function extractPriceTagF(text) {
+  const t = String(text || "");
+  const m = t.match(/@\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (!m) return "";
+  return normalizePriceTag2(m[1]);
+}
+
+function detectSymbolF(text) {
+  const t = String(text || "");
+  const m = t.match(/:\s*([A-Za-z0-9\/#]+)\s*で\s*(?:buy|sell)\b/i);
+  if (!m) return "";
+  return normalizeSymbol(m[1]);
+}
+
+function queueFamilySignal({ channel, queues, room, who, text, symbol, cmd, priceTag }) {
   symbol = normalizeSymbol(symbol);
   room = String(room || "");
   who = String(who || "");
   text = String(text || "");
+  priceTag = priceTag ? normalizePriceTag2(priceTag) : "";
 
   if (!cmd) return { ok: true, ignored: "no_direction" };
 
@@ -244,18 +289,19 @@ function queueFamilySignal({ channel, queues, room, who, text, symbol, cmd }) {
     cmd,
     symbol,
     id: safeId(channel.toUpperCase()),
+    priceTag,
     room,
     who,
     ts: Date.now()
   };
 
-  const dkey = abMakeDedupKey({ channel, who, room, cmd, symbol, text });
+  const dkey = abMakeDedupKey({ channel, who, room, cmd, symbol, text, priceTag });
   if (abIsDuplicateAndMark(dkey)) {
     return { ok: true, deduped: true, reason: "short_window" };
   }
 
   pushFamilyQueues(queues, item);
-  return { ok: true, queued: true, copies: queues.length };
+  return { ok: true, queued: true, copies: queues.length, priceTag };
 }
 
 // ===== Plain routes =====
@@ -383,6 +429,38 @@ app.post("/signal/e_plain", (req, res) => {
     text,
     symbol,
     cmd
+  });
+  return res.json(out);
+});
+
+// f = TradingView REM BB Pullback Rider V3
+app.post("/signal/f_plain", (req, res) => {
+  if (!requireKey(req, res)) return;
+
+  const room = String(req.query.room || "");
+  const who = String(req.query.who || "");
+  const text = typeof req.body === "string" ? req.body : "";
+
+  if (!text) return res.status(400).json({ error: "missing body text" });
+
+  const cmd = detectDirectionF(text);
+  const detectedSymbol = detectSymbolF(text);
+  const symbol = String(req.query.symbol || detectedSymbol || "USDJPY");
+  const priceTag = extractPriceTagF(text);
+
+  if (!priceTag) {
+    return res.json({ ok: true, ignored: "no_price_tag" });
+  }
+
+  const out = queueFamilySignal({
+    channel: "f",
+    queues: queuesF,
+    room,
+    who,
+    text,
+    symbol,
+    cmd,
+    priceTag
   });
   return res.json(out);
 });
