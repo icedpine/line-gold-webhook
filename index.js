@@ -218,8 +218,8 @@ for (let i = 1; i <= FAMILY_COPIES; i++) {
 // a = Bocchi
 function detectDirectionA(text) {
   const t = String(text || "");
-  if (t.includes("スタンバイサイン") && t.includes("BUY")) return "BUY";
-  if (t.includes("スタンバイサイン") && t.includes("SELL")) return "SELL";
+  if (t.includes("エントリーサイン") && t.includes("BUY")) return "BUY";
+  if (t.includes("エントリーサイン") && t.includes("SELL")) return "SELL";
   return "";
 }
 
