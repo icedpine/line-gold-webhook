@@ -1,10 +1,18 @@
 import express from "express";
+import { Client, GatewayIntentBits, Partials } from "discord.js";
 
 const app = express();
 
 app.use(express.text({ type: "*/*", limit: "1mb" }));
 
 const SECRET_KEY = process.env.SECRET_KEY;
+
+// ===== Discord Bot / GAS settings =====
+// 追加：Discord通知を読み取り、GASへ送るための環境変数
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const GAS_WEBAPP_URL = process.env.GAS_WEBAPP_URL;
+const GAS_SECRET_KEY = process.env.GAS_SECRET_KEY;
 
 // ===== 共通設定 =====
 const MAX_QUEUE = 200;
@@ -498,5 +506,188 @@ app.post("/signal/f_plain", (req, res) => {
   return res.json(out);
 });
 
+// ==================================================
+// 追加：Discord Bot → GAS → Google Sheets
+// ==================================================
+
+function startDiscordTradeLoggerBot() {
+  const ready =
+    DISCORD_BOT_TOKEN &&
+    DISCORD_CHANNEL_ID &&
+    GAS_WEBAPP_URL &&
+    GAS_SECRET_KEY;
+
+  if (!ready) {
+    console.log("[TradeLoggerBot] Disabled. Missing one or more env vars:", {
+      DISCORD_BOT_TOKEN: Boolean(DISCORD_BOT_TOKEN),
+      DISCORD_CHANNEL_ID: Boolean(DISCORD_CHANNEL_ID),
+      GAS_WEBAPP_URL: Boolean(GAS_WEBAPP_URL),
+      GAS_SECRET_KEY: Boolean(GAS_SECRET_KEY)
+    });
+    return;
+  }
+
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent
+    ],
+    partials: [Partials.Channel]
+  });
+
+  client.once("ready", () => {
+    console.log(`[TradeLoggerBot] Logged in as ${client.user.tag}`);
+    console.log(`[TradeLoggerBot] Watching channel: ${DISCORD_CHANNEL_ID}`);
+  });
+
+  client.on("messageCreate", async (message) => {
+    try {
+      if (message.channelId !== DISCORD_CHANNEL_ID) return;
+
+      // 自分自身の投稿だけ無視
+      if (message.author?.id === client.user.id) return;
+
+      const parsed = parseTradeNotice(message);
+
+      if (!parsed) {
+        console.log("[TradeLoggerBot] Ignored non-trade message.");
+        return;
+      }
+
+      await sendToGas(parsed);
+
+      console.log(
+        "[TradeLoggerBot] Logged:",
+        parsed.type,
+        parsed.sourceName,
+        parsed.symbol,
+        parsed.identifier,
+        parsed.profit || parsed.direction || ""
+      );
+    } catch (err) {
+      console.error("[TradeLoggerBot] messageCreate error:", err);
+    }
+  });
+
+  client.login(DISCORD_BOT_TOKEN).catch((err) => {
+    console.error("[TradeLoggerBot] Discord login failed:", err);
+  });
+}
+
+function parseTradeNotice(message) {
+  const sourceName =
+    message.author?.username ||
+    message.webhookId ||
+    "unknown";
+
+  const parts = [];
+
+  if (message.content) {
+    parts.push(message.content);
+  }
+
+  for (const embed of message.embeds || []) {
+    if (embed.title) {
+      parts.push(embed.title);
+    }
+
+    if (embed.description) {
+      parts.push(embed.description);
+    }
+
+    for (const field of embed.fields || []) {
+      parts.push(`${field.name}: ${field.value}`);
+    }
+
+    if (embed.footer?.text) {
+      parts.push(`footer: ${embed.footer.text}`);
+    }
+  }
+
+  const rawText = parts.join("\n").trim();
+
+  if (!rawText) return null;
+
+  const isEntry =
+    rawText.includes("エントリー検出") ||
+    rawText.includes("方向:") ||
+    rawText.includes("方向：");
+
+  const isClose =
+    rawText.includes("決済完了通知") ||
+    rawText.includes("損益:") ||
+    rawText.includes("損益：");
+
+  if (!isEntry && !isClose) return null;
+
+  return {
+    type: isClose ? "close" : "entry",
+    sourceName,
+    eventTime: pickTradeValue(rawText, ["時刻"]),
+    symbol: pickTradeValue(rawText, ["銘柄"]),
+    direction: pickTradeValue(rawText, ["方向"]),
+    price: pickTradeValue(rawText, ["価格"]),
+    holding: pickTradeValue(rawText, ["保有"]),
+    profit: pickTradeValue(rawText, ["損益"]),
+    identifier: pickTradeValue(rawText, ["識別"]),
+    rawText
+  };
+}
+
+function pickTradeValue(text, labels) {
+  for (const label of labels) {
+    const re = new RegExp(`${escapeRegExpForTradeLogger(label)}\\s*[:：]\\s*([^\\n]+)`, "i");
+    const m = String(text || "").match(re);
+
+    if (m) {
+      return m[1].trim();
+    }
+  }
+
+  return "";
+}
+
+function escapeRegExpForTradeLogger(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function sendToGas(payload) {
+  const url = `${GAS_WEBAPP_URL}?key=${encodeURIComponent(GAS_SECRET_KEY)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`GAS HTTP ${res.status}: ${text}`);
+  }
+
+  let json;
+
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid GAS response: ${text}`);
+  }
+
+  if (!json.ok) {
+    throw new Error(`GAS error: ${text}`);
+  }
+
+  return json;
+}
+
+// ===== server start =====
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("Server running on port", port));
+
+app.listen(port, () => {
+  console.log("Server running on port", port);
+  startDiscordTradeLoggerBot();
+});
