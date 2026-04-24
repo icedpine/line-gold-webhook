@@ -76,8 +76,12 @@ function normalizeSymbol(symbol) {
   return s;
 }
 
+// ===== 修正：priceTag が空欄のとき 0.00 にならないようにする =====
 function normalizePriceTag2(priceTag) {
-  const n = Number(priceTag);
+  const raw = String(priceTag ?? "").trim();
+  if (raw === "") return "";
+
+  const n = Number(raw);
   if (!Number.isFinite(n)) return "";
   return n.toFixed(2);
 }
@@ -116,7 +120,9 @@ function handleSignalFamily(req, res, queues, seen) {
     }
   }
 
-  let { cmd, symbol, id, priceTag } = body || {};
+  // ===== 修正：positionSize も受け取る =====
+  let { cmd, symbol, id, priceTag, positionSize } = body || {};
+
   if (!cmd || !symbol || !id) {
     return res.status(400).json({ error: "missing fields" });
   }
@@ -125,6 +131,7 @@ function handleSignalFamily(req, res, queues, seen) {
   symbol = normalizeSymbol(symbol);
   id = String(id);
   priceTag = priceTag == null ? "" : normalizePriceTag2(priceTag);
+  positionSize = positionSize == null ? "" : String(positionSize);
 
   if (!cmd) return res.status(400).json({ error: "invalid cmd" });
   if (!symbol) return res.status(400).json({ error: "invalid symbol" });
@@ -133,10 +140,25 @@ function handleSignalFamily(req, res, queues, seen) {
   if (seen.has(id)) return res.json({ ok: true, deduped: true });
   seen.set(id, Date.now());
 
-  const item = { cmd, symbol, id, priceTag, ts: Date.now() };
+  // ===== 修正：positionSize もキューに保存 =====
+  const item = {
+    cmd,
+    symbol,
+    id,
+    priceTag,
+    positionSize,
+    ts: Date.now()
+  };
+
   pushFamilyQueues(queues, item);
 
-  return res.json({ ok: true, queued: true, copies: queues.length, priceTag });
+  return res.json({
+    ok: true,
+    queued: true,
+    copies: queues.length,
+    priceTag,
+    positionSize
+  });
 }
 
 function handleLast(req, res, queue) {
@@ -173,6 +195,7 @@ function abIsDuplicateAndMark(key) {
 // d = Yozakura
 // e = Anyanical
 // f = TradingView REM BB Pullback Rider V3
+// g = TradingView Wemof Strategy
 const queuesA = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenA = new Map();
 
@@ -191,6 +214,10 @@ const seenE = new Map();
 const queuesF = Array.from({ length: FAMILY_COPIES }, () => []);
 const seenF = new Map();
 
+// ===== 追加：Gグループ Wemof =====
+const queuesG = Array.from({ length: FAMILY_COPIES }, () => []);
+const seenG = new Map();
+
 // ===== health =====
 app.get("/health", (req, res) => res.json({ ok: true, status: "ok" }));
 
@@ -204,6 +231,9 @@ app.post("/signal/d", jsonParser, (req, res) => handleSignalFamily(req, res, que
 app.post("/signal/e", jsonParser, (req, res) => handleSignalFamily(req, res, queuesE, seenE));
 app.post("/signal/f", jsonParser, (req, res) => handleSignalFamily(req, res, queuesF, seenF));
 
+// ===== 追加：Gグループ Wemof =====
+app.post("/signal/g", jsonParser, (req, res) => handleSignalFamily(req, res, queuesG, seenG));
+
 for (let i = 1; i <= FAMILY_COPIES; i++) {
   app.get(`/last/a${i}`, (req, res) => handleLast(req, res, queuesA[i - 1]));
   app.get(`/last/b${i}`, (req, res) => handleLast(req, res, queuesB[i - 1]));
@@ -211,6 +241,9 @@ for (let i = 1; i <= FAMILY_COPIES; i++) {
   app.get(`/last/d${i}`, (req, res) => handleLast(req, res, queuesD[i - 1]));
   app.get(`/last/e${i}`, (req, res) => handleLast(req, res, queuesE[i - 1]));
   app.get(`/last/f${i}`, (req, res) => handleLast(req, res, queuesF[i - 1]));
+
+  // ===== 追加：Gグループ Wemof =====
+  app.get(`/last/g${i}`, (req, res) => handleLast(req, res, queuesG[i - 1]));
 }
 
 // ===== 判定関数 =====
